@@ -1,8 +1,5 @@
 #include <opencv2/opencv.hpp>
 #include <iostream>
-#include "TileReader.h"
-#include "OutputWriter.h"
-#include <omp.h>
 
 struct TileMeta {
     int row_offset;
@@ -18,11 +15,13 @@ cv::Mat rotate_tile(const cv::Mat& tile, double angle, const TileMeta& meta) {
     double global_cy = meta.full_image_height / 2.0;
 
     cv::Mat M = cv::getRotationMatrix2D(cv::Point2f(global_cx, global_cy), angle, 1.0);
+
     M.at<double>(0, 2) -= meta.col_offset;
     M.at<double>(1, 2) -= meta.row_offset;
 
     cv::Mat result;
-    cv::warpAffine(tile, result, M, tile.size(), cv::INTER_LINEAR, cv::BORDER_REFLECT);
+    cv::warpAffine(tile, result, M, tile.size(),
+                   cv::INTER_LINEAR, cv::BORDER_REFLECT);
     return result;
 }
 
@@ -43,7 +42,7 @@ cv::Mat crop_tile(const cv::Mat& tile, int crop_x, int crop_y, int crop_w, int c
     int inter_y2 = std::min(meta.row_offset + tile.rows, crop_y + crop_h);
 
     if (inter_x1 >= inter_x2 || inter_y1 >= inter_y2) {
-        return cv::Mat(); // empty mat = tile outside crop region
+        return cv::Mat();
     }
 
     int lx1 = inter_x1 - meta.col_offset;
@@ -57,11 +56,15 @@ cv::Mat crop_tile(const cv::Mat& tile, int crop_x, int crop_y, int crop_w, int c
 // STRIP OVERLAP
 cv::Mat strip_overlap(const cv::Mat& tile, int overlap) {
     if (overlap == 0) return tile;
-    return tile(cv::Rect(overlap, overlap, tile.cols - 2 * overlap, tile.rows - 2 * overlap)).clone();
+    return tile(cv::Rect(overlap, overlap,
+                         tile.cols - 2 * overlap,
+                         tile.rows - 2 * overlap)).clone();
 }
 
 // MAIN INTERFACE
-cv::Mat apply_transform(const cv::Mat& tile, const std::string& transform_type, double param, const TileMeta& meta, int crop_x = 0, int crop_y = 0, int crop_w = 0, int crop_h = 0) {
+cv::Mat apply_transform(const cv::Mat& tile, const std::string& transform_type,
+                        double param, const TileMeta& meta,
+                        int crop_x=0, int crop_y=0, int crop_w=0, int crop_h=0) {
     cv::Mat result;
 
     if (transform_type == "rotate") {
@@ -79,7 +82,8 @@ cv::Mat apply_transform(const cv::Mat& tile, const std::string& transform_type, 
     return strip_overlap(result, meta.overlap);
 }
 
-void run_transform_tests() {
+// TEST
+int main() {
     cv::Mat tile(100, 100, CV_8UC3);
     cv::randu(tile, 0, 255);
 
@@ -90,57 +94,20 @@ void run_transform_tests() {
     meta.full_image_width = 2000;
     meta.overlap = 10;
 
+    // Test rotate
     cv::Mat r1 = apply_transform(tile, "rotate", 45.0, meta);
     std::cout << "Rotate output shape: " << r1.rows << "x" << r1.cols << std::endl;
 
+    // Test resize
     cv::Mat r2 = apply_transform(tile, "resize", 0.5, meta);
     std::cout << "Resize output shape: " << r2.rows << "x" << r2.cols << std::endl;
 
+    // Test crop
     cv::Mat r3 = apply_transform(tile, "crop", 0, meta, 500, 500, 200, 200);
     if (r3.empty())
         std::cout << "Crop output: None (tile outside crop)" << std::endl;
     else
         std::cout << "Crop output shape: " << r3.rows << "x" << r3.cols << std::endl;
-}
 
-void run_tile_reader_workflow() {
-    TileReader reader("Philips-3.tiff");
-    int overlap = 2;
-    int tile_size = reader.computeTileSize(TILE_MEMORY_BUDGET, overlap);
-    auto grid = reader.getTileGrid(tile_size);
-    int channels = 3; // fixed: was undefined in original
-
-    std::cout << "Image:     " << reader.getImageWidth() << " x " << reader.getImageHeight() << "\n";
-    std::cout << "Tile size: " << tile_size << "px logical (" << tile_size + 2 * overlap << "px buffered)\n";
-    std::cout << "Tiles:     " << grid.size() << " total\n\n";
-
-    TiledOutputWriter writer("output.tiff", reader.getImageWidth(), reader.getImageHeight(), channels, (int)grid.size(), true);
-
-    #pragma omp parallel num_threads(2)
-    {
-        if (omp_get_thread_num() == 0) {
-            for (auto& idx : grid) {
-                Tile t = reader.getTile(idx.x, idx.y, idx.width, idx.height, overlap);
-                writer.submit_tile(t);
-                std::cout << "  tile (" << idx.col << "," << idx.row << ")"
-                          << "  origin=(" << idx.x << "," << idx.y << ")"
-                          << "  buffer=" << t.width << "x" << t.height << "\n";
-            }
-            writer.finalize();
-        } else {
-            writer.run();
-        }
-    }
-}
-
-int main() {
-    try {
-        run_tile_reader_workflow();
-    } catch (const std::runtime_error& e) {
-        std::cerr << "Error: " << e.what() << "\n";
-        return 1;
-    }
-
-    run_transform_tests();
     return 0;
 }
