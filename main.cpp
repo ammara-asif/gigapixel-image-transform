@@ -1,146 +1,137 @@
-#include <opencv2/opencv.hpp>
 #include <iostream>
+#include <vector>
+#include <thread>
+#include <algorithm>
+#include <string>
+#include <mutex>
+
 #include "TileReader.h"
+#include "Tile.h"
+#include "BoundedTileQueue.h"
 #include "OutputWriter.h"
-#include <omp.h>
+#include "Transform.h"
 
-struct TileMeta {
-    int row_offset;
-    int col_offset;
-    int full_image_height;
-    int full_image_width;
-    int overlap;
-};
-
-// ROTATE
-cv::Mat rotate_tile(const cv::Mat& tile, double angle, const TileMeta& meta) {
-    double global_cx = meta.full_image_width / 2.0;
-    double global_cy = meta.full_image_height / 2.0;
-
-    cv::Mat M = cv::getRotationMatrix2D(cv::Point2f(global_cx, global_cy), angle, 1.0);
-    M.at<double>(0, 2) -= meta.col_offset;
-    M.at<double>(1, 2) -= meta.row_offset;
-
-    cv::Mat result;
-    cv::warpAffine(tile, result, M, tile.size(), cv::INTER_LINEAR, cv::BORDER_REFLECT);
-    return result;
+// --- Thread-Safe Console Logging ---
+std::mutex printMutex;
+void logMessage(const std::string &msg)
+{
+    std::lock_guard<std::mutex> lock(printMutex);
+    std::cout << msg << std::endl;
 }
 
-// RESIZE
-cv::Mat resize_tile(const cv::Mat& tile, double scale_factor) {
-    int new_w = (int)(tile.cols * scale_factor);
-    int new_h = (int)(tile.rows * scale_factor);
-    cv::Mat result;
-    cv::resize(tile, result, cv::Size(new_w, new_h), 0, 0, cv::INTER_LINEAR);
-    return result;
-}
-
-// CROP
-cv::Mat crop_tile(const cv::Mat& tile, int crop_x, int crop_y, int crop_w, int crop_h, const TileMeta& meta) {
-    int inter_x1 = std::max(meta.col_offset, crop_x);
-    int inter_y1 = std::max(meta.row_offset, crop_y);
-    int inter_x2 = std::min(meta.col_offset + tile.cols, crop_x + crop_w);
-    int inter_y2 = std::min(meta.row_offset + tile.rows, crop_y + crop_h);
-
-    if (inter_x1 >= inter_x2 || inter_y1 >= inter_y2) {
-        return cv::Mat(); // empty mat = tile outside crop region
-    }
-
-    int lx1 = inter_x1 - meta.col_offset;
-    int ly1 = inter_y1 - meta.row_offset;
-    int lx2 = inter_x2 - meta.col_offset;
-    int ly2 = inter_y2 - meta.row_offset;
-
-    return tile(cv::Rect(lx1, ly1, lx2 - lx1, ly2 - ly1)).clone();
-}
-
-// STRIP OVERLAP
-cv::Mat strip_overlap(const cv::Mat& tile, int overlap) {
-    if (overlap == 0) return tile;
-    return tile(cv::Rect(overlap, overlap, tile.cols - 2 * overlap, tile.rows - 2 * overlap)).clone();
-}
-
-// MAIN INTERFACE
-cv::Mat apply_transform(const cv::Mat& tile, const std::string& transform_type, double param, const TileMeta& meta, int crop_x = 0, int crop_y = 0, int crop_w = 0, int crop_h = 0) {
-    cv::Mat result;
-
-    if (transform_type == "rotate") {
-        result = rotate_tile(tile, param, meta);
-    } else if (transform_type == "resize") {
-        result = resize_tile(tile, param);
-    } else if (transform_type == "crop") {
-        result = crop_tile(tile, crop_x, crop_y, crop_w, crop_h, meta);
-        if (result.empty()) return cv::Mat();
-    } else {
-        std::cerr << "Unknown transform: " << transform_type << std::endl;
-        return cv::Mat();
-    }
-
-    return strip_overlap(result, meta.overlap);
-}
-
-void run_transform_tests() {
-    cv::Mat tile(100, 100, CV_8UC3);
-    cv::randu(tile, 0, 255);
-
-    TileMeta meta;
-    meta.row_offset = 512;
-    meta.col_offset = 512;
-    meta.full_image_height = 2000;
-    meta.full_image_width = 2000;
-    meta.overlap = 10;
-
-    cv::Mat r1 = apply_transform(tile, "rotate", 45.0, meta);
-    std::cout << "Rotate output shape: " << r1.rows << "x" << r1.cols << std::endl;
-
-    cv::Mat r2 = apply_transform(tile, "resize", 0.5, meta);
-    std::cout << "Resize output shape: " << r2.rows << "x" << r2.cols << std::endl;
-
-    cv::Mat r3 = apply_transform(tile, "crop", 0, meta, 500, 500, 200, 200);
-    if (r3.empty())
-        std::cout << "Crop output: None (tile outside crop)" << std::endl;
-    else
-        std::cout << "Crop output shape: " << r3.rows << "x" << r3.cols << std::endl;
-}
-
-void run_tile_reader_workflow() {
-    TileReader reader("Philips-3.tiff");
-    int overlap = 2;
-    int tile_size = reader.computeTileSize(TILE_MEMORY_BUDGET, overlap);
-    auto grid = reader.getTileGrid(tile_size);
-    int channels = 3; // fixed: was undefined in original
-
-    std::cout << "Image:     " << reader.getImageWidth() << " x " << reader.getImageHeight() << "\n";
-    std::cout << "Tile size: " << tile_size << "px logical (" << tile_size + 2 * overlap << "px buffered)\n";
-    std::cout << "Tiles:     " << grid.size() << " total\n\n";
-
-    TiledOutputWriter writer("output.tiff", reader.getImageWidth(), reader.getImageHeight(), channels, (int)grid.size(), true);
-
-    #pragma omp parallel num_threads(2)
+int main()
+{
+    try
     {
-        if (omp_get_thread_num() == 0) {
-            for (auto& idx : grid) {
-                Tile t = reader.getTile(idx.x, idx.y, idx.width, idx.height, overlap);
-                writer.submit_tile(t);
-                std::cout << "  tile (" << idx.col << "," << idx.row << ")"
-                          << "  origin=(" << idx.x << "," << idx.y << ")"
-                          << "  buffer=" << t.width << "x" << t.height << "\n";
-            }
-            writer.finalize();
-        } else {
-            writer.run();
-        }
-    }
-}
+        logMessage("[Main] Starting Gigapixel Processing Pipeline...");
 
-int main() {
-    try {
-        run_tile_reader_workflow();
-    } catch (const std::runtime_error& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        logMessage("[Main] Initializing TileReader for 'input.tiff'...");
+        TileReader reader("input.tiff");
+        int overlap = 0;
+
+        logMessage("[Main] Computing optimal tile size based on memory budget...");
+        int tileSize = reader.computeTileSize(TILE_MEMORY_BUDGET, overlap);
+        tileSize = std::min(tileSize, 512);
+
+        std::vector<TileIndex> grid = reader.getTileGrid(tileSize);
+        logMessage("[Main] Grid calculated. Total tiles to process: " + std::to_string(grid.size()));
+
+        // ---------------------------------------------------------
+        // INITIALIZE YOUR WRITER
+        // ---------------------------------------------------------
+        int imgChannels = reader.getChannels();
+
+        logMessage("[Main] Initializing TiledOutputWriter...");
+        TiledOutputWriter writer("output.tiff",
+                                 reader.getImageWidth(),
+                                 reader.getImageHeight(),
+                                 imgChannels,
+                                 grid.size(),
+                                 tileSize,
+                                 // TODO: set to true for bigtiff
+                                 false); // Use BigTIFF if set to True
+
+        // Hardware concurrency setup
+        unsigned int numCores = std::thread::hardware_concurrency();
+        unsigned int numWorkers = std::max(1u, numCores - 2);
+
+        logMessage("[Main] Hardware cores detected: " + std::to_string(numCores));
+        logMessage("[Main] Reserving 1 core for Reader, 1 for Writer. Spawning " + std::to_string(numWorkers) + " Worker threads.");
+
+        // We only need ONE queue now (Disk -> Workers)
+        BoundedTileQueue inputQueue(numWorkers * 2);
+
+        // ---------------------------------------------------------
+        // STAGE 3: Start the Writer Thread
+        // ---------------------------------------------------------
+        logMessage("[Main] Starting Dedicated Writer Thread...");
+        std::thread writerThread([&writer]()
+                                 { writer.run(); });
+
+        // ---------------------------------------------------------
+        // STAGE 2: Start the Worker Threads
+        // ---------------------------------------------------------
+        std::vector<std::thread> workers;
+        for (unsigned int i = 0; i < numWorkers; ++i)
+        {
+            workers.emplace_back([&inputQueue, &writer, i]()
+                                 {
+                logMessage("[Worker " + std::to_string(i) + "] Started and waiting for tiles...");
+                Tile tile;
+                
+                while (inputQueue.pop(tile)) {
+                    logMessage("[Worker " + std::to_string(i) + "] Popped tile (" + std::to_string(tile.x) + "," + std::to_string(tile.y) + "). Processing...");
+                    
+                    processTile(tile); // Do the heavy math
+                    
+                    logMessage("[Worker " + std::to_string(i) + "] Finished tile (" + std::to_string(tile.x) + "," + std::to_string(tile.y) + "). Submitting to Writer...");
+                    writer.submit_tile(tile); 
+                } 
+                
+                logMessage("[Worker " + std::to_string(i) + "] Queue empty & finished signal received. Shutting down."); });
+        }
+
+        // ---------------------------------------------------------
+        // STAGE 1: The Reader (Main Thread)
+        // ---------------------------------------------------------
+        logMessage("[Main/Reader] Pipeline fully active. Beginning disk reads...");
+        int tilesRead = 0;
+        for (const auto &idx : grid)
+        {
+            logMessage("[Main/Reader] Reading tile " + std::to_string(tilesRead + 1) + "/" + std::to_string(grid.size()) + " at (" + std::to_string(idx.x) + "," + std::to_string(idx.y) + ")...");
+
+            Tile loadedTile = reader.getTile(idx.x, idx.y, idx.width, idx.height, overlap);
+            inputQueue.push(std::move(loadedTile));
+
+            tilesRead++;
+        }
+
+        // --- Graceful Shutdown Sequence ---
+        logMessage("[Main] All tiles read from disk. Sending 'Finished' signal to Input Queue.");
+        inputQueue.setFinished(); // 1. Tell workers no more input is coming
+
+        logMessage("[Main] Waiting for Worker threads to clear the remaining queue...");
+        for (auto &worker : workers)
+        {
+            worker.join(); // 2. Wait for workers to finish all processing
+        }
+        logMessage("[Main] All Worker threads have successfully joined (shutdown).");
+
+        logMessage("[Main] Finalizing Output Writer (pushing sentinel and waiting)...");
+        // 3. Tell your writer to push the nullptr sentinel and spin-wait for done_
+        writer.finalize();
+
+        logMessage("[Main] Joining Writer thread...");
+        // 4. Join the writer thread to ensure clean OS cleanup
+        writerThread.join();
+
+        logMessage("[Main] Pipeline integration complete. Image processed and saved.");
+    }
+    catch (const std::exception &e)
+    {
+        logMessage(std::string("[FATAL ERROR] ") + e.what());
         return 1;
     }
 
-    run_transform_tests();
     return 0;
 }
