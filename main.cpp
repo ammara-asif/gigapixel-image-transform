@@ -25,31 +25,83 @@ int main()
     {
         logMessage("[Main] Starting Gigapixel Processing Pipeline...");
 
+        // =========================================================
+        // USER INPUT: Select the Transformation
+        // =========================================================
+
+        int userChoice = 0;
+        std::cout << "======================================\n";
+        std::cout << " Gigapixel Image Transform Pipeline\n";
+        std::cout << "======================================\n";
+        std::cout << "1. Grayscale (Point Operation)\n";
+        std::cout << "2. Rotate 90 CW (Geometric Inverse Map)\n";
+        std::cout << "Select an operation (1 or 2): ";
+
+        while (!(std::cin >> userChoice) || (userChoice < 1 || userChoice > 2))
+        {
+            std::cout << "Invalid input. Please enter 1 or 2: ";
+            std::cin.clear();             // clear error flags
+            std::cin.ignore(10000, '\n'); // discard bad input
+        }
+
+        TransformOperation currentOp;
+        if (userChoice == 2)
+        {
+            currentOp = TransformOperation::ROTATE_90_CW;
+            logMessage("\n[Main] User selected: ROTATE 90 CW");
+        }
+        else
+        {
+            currentOp = TransformOperation::GRAYSCALE;
+            logMessage("\n[Main] User selected: GRAYSCALE");
+        }
+
+        // =========================================================
+        // Tile Reader Config
+        // =========================================================
+
         logMessage("[Main] Initializing TileReader for 'input.tiff'...");
         TileReader reader("input.tiff");
         int overlap = 0;
 
         logMessage("[Main] Computing optimal tile size based on memory budget...");
         int tileSize = reader.computeTileSize(TILE_MEMORY_BUDGET, overlap);
-        tileSize = std::min(tileSize, 512);
+        tileSize = std::min(tileSize, 512); // TODO: remove when using BIGTIFF
 
-        std::vector<TileIndex> grid = reader.getTileGrid(tileSize);
-        logMessage("[Main] Grid calculated. Total tiles to process: " + std::to_string(grid.size()));
+        // std::vector<TileIndex> grid = reader.getTileGrid(tileSize);
+        // logMessage("[Main] Grid calculated. Total tiles to process: " + std::to_string(grid.size()));
+
+        int input_w = reader.getImageWidth();
+        int input_h = reader.getImageHeight();
+        int imgChannels = reader.getChannels();
+
+        // =========================================================
+        // PIPELINE CONFIGURATION: Change this flag to swap algorithms!
+        // =========================================================
+
+        // Calculate Output Dimensions dynamically
+        int output_w = input_w;
+        int output_h = input_h;
+
+        if (currentOp == TransformOperation::ROTATE_90_CW)
+        {
+            output_w = input_h; // Swap dimensions for 90 CW
+            output_h = input_w;
+        }
 
         // ---------------------------------------------------------
         // INITIALIZE YOUR WRITER
         // ---------------------------------------------------------
-        int imgChannels = reader.getChannels();
-
         logMessage("[Main] Initializing TiledOutputWriter...");
-        TiledOutputWriter writer("output.tiff",
-                                 reader.getImageWidth(),
-                                 reader.getImageHeight(),
-                                 imgChannels,
-                                 grid.size(),
-                                 tileSize,
-                                 // TODO: set to true for bigtiff
-                                 false); // Use BigTIFF if set to True
+        TiledOutputWriter writer(
+            "output.tiff",
+            output_w,
+            output_h,
+            imgChannels,
+            0,
+            tileSize,
+            // TODO: set to true for bigtiff
+            false); // Use BigTIFF if set to True
 
         // Hardware concurrency setup
         unsigned int numCores = std::thread::hardware_concurrency();
@@ -62,14 +114,14 @@ int main()
         BoundedTileQueue inputQueue(numWorkers * 2);
 
         // ---------------------------------------------------------
-        // STAGE 3: Start the Writer Thread
+        // Start the Writer Thread
         // ---------------------------------------------------------
         logMessage("[Main] Starting Dedicated Writer Thread...");
         std::thread writerThread([&writer]()
                                  { writer.run(); });
 
         // ---------------------------------------------------------
-        // STAGE 2: Start the Worker Threads
+        // Start the Worker Threads
         // ---------------------------------------------------------
         std::vector<std::thread> workers;
         for (unsigned int i = 0; i < numWorkers; ++i)
@@ -92,18 +144,63 @@ int main()
         }
 
         // ---------------------------------------------------------
-        // STAGE 1: The Reader (Main Thread)
+        // The Reader (Main Thread)
         // ---------------------------------------------------------
         logMessage("[Main/Reader] Pipeline fully active. Beginning disk reads...");
+
+        // Calculate total tiles so the logger knows the progress
+        int nTilesX = (output_w + tileSize - 1) / tileSize;
+        int nTilesY = (output_h + tileSize - 1) / tileSize;
+        int totalTiles = nTilesX * nTilesY;
+
         int tilesRead = 0;
-        for (const auto &idx : grid)
+
+        // Loop over the OUTPUT dimensions
+        for (int out_y = 0; out_y < output_h; out_y += tileSize)
         {
-            logMessage("[Main/Reader] Reading tile " + std::to_string(tilesRead + 1) + "/" + std::to_string(grid.size()) + " at (" + std::to_string(idx.x) + "," + std::to_string(idx.y) + ")...");
+            for (int out_x = 0; out_x < output_w; out_x += tileSize)
+            {
 
-            Tile loadedTile = reader.getTile(idx.x, idx.y, idx.width, idx.height, overlap);
-            inputQueue.push(std::move(loadedTile));
+                // Calculate actual size of this output tile (handling edge clamps)
+                int tile_w = std::min(tileSize, output_w - out_x);
+                int tile_h = std::min(tileSize, output_h - out_y);
 
-            tilesRead++;
+                // --- DYNAMIC MAPPING LOGIC ---
+                int in_x, in_y, read_w, read_h;
+
+                if (currentOp == TransformOperation::ROTATE_90_CW)
+                {
+                    // Inverse Mapping for Rotation
+                    in_x = out_y;
+                    in_y = input_h - out_x - tile_w;
+                    read_w = tile_h;
+                    read_h = tile_w;
+                }
+                else
+                {
+                    // Forward Mapping for Grayscale / Point Operations
+                    in_x = out_x;
+                    in_y = out_y;
+                    read_w = tile_w;
+                    read_h = tile_h;
+                }
+
+                logMessage("[Main/Reader] Tile " + std::to_string(tilesRead + 1) + "/" + std::to_string(totalTiles) +
+                           " | Read (" + std::to_string(in_x) + "," + std::to_string(in_y) + ") -> Write (" +
+                           std::to_string(out_x) + "," + std::to_string(out_y) + ")");
+
+                Tile loadedTile = reader.getTile(in_x, in_y, read_w, read_h, overlap);
+
+                loadedTile.out_x = out_x;
+                loadedTile.out_y = out_y;
+                loadedTile.operation = currentOp; // Pass the flag to the worker
+
+                loadedTile.x = out_x;
+                loadedTile.y = out_y;
+
+                inputQueue.push(std::move(loadedTile));
+                tilesRead++;
+            }
         }
 
         // --- Graceful Shutdown Sequence ---

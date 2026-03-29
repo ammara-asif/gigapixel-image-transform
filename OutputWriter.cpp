@@ -9,12 +9,22 @@
 #include <omp.h>
 
 // Constructor
-TiledOutputWriter::TiledOutputWriter(const std::string &filename, int full_width,
-                                     int full_height, int channels, int total_tiles, int logical_tile_size,
-                                     bool big_tiff) : filename_(filename),
-                                                      full_width_(full_width), full_height_(full_height),
-                                                      channels_(channels), total_tiles_(total_tiles),
-                                                      big_tiff_(big_tiff), logical_tile_size_(logical_tile_size), tif_(nullptr), done_(false)
+TiledOutputWriter::TiledOutputWriter(
+    const std::string &filename,
+    int full_width,
+    int full_height,
+    int channels,
+    int total_tiles,
+    int logical_tile_size,
+    bool big_tiff) : filename_(filename),
+                     full_width_(full_width),
+                     full_height_(full_height),
+                     channels_(channels),
+                     total_tiles_(total_tiles),
+                     logical_tile_size_(logical_tile_size),
+                     big_tiff_(big_tiff),
+                     tif_(nullptr),
+                     done_(false)
 {
     omp_init_lock(&queue_lock_);
     open_tiff(); // opens the TIFF file and writes all required tags
@@ -169,6 +179,11 @@ void TiledOutputWriter::process_and_write(Tile *tile)
     // (logical_tile_size_ was added to your class constructor in the last step)
     int logical_w = std::min(logical_tile_size_, full_width_ - tile->x);
     int logical_h = std::min(logical_tile_size_, full_height_ - tile->y);
+
+    // This absolutely guarantees memcpy cannot read past the tile buffer,
+    // even if logical_tile_size_ is wrong.
+    logical_w = std::min(logical_w, tile->width - actual_left_ov);
+    logical_h = std::min(logical_h, tile->height - actual_top_ov);
 
     if (logical_w <= 0 || logical_h <= 0)
         return;
