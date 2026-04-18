@@ -10,6 +10,7 @@
 #include "BoundedTileQueue.h"
 #include "OutputWriter.h"
 #include "Transform.h"
+#include "Scheduler.h"
 
 // --- Thread-Safe Console Logging ---
 std::mutex printMutex;
@@ -61,7 +62,7 @@ int main()
         // =========================================================
 
         logMessage("[Main] Initializing TileReader for 'input.tiff'...");
-        TileReader reader("input.tiff");
+        TileReader reader("images/input.tiff");
         int overlap = 0;
 
         logMessage("[Main] Computing optimal tile size based on memory budget...");
@@ -112,7 +113,8 @@ int main()
 
         // We only need ONE queue now (Disk -> Workers)
         BoundedTileQueue inputQueue(numWorkers * 2);
-
+        
+        Scheduler scheduler;
         // ---------------------------------------------------------
         // Start the Writer Thread
         // ---------------------------------------------------------
@@ -126,7 +128,7 @@ int main()
         std::vector<std::thread> workers;
         for (unsigned int i = 0; i < numWorkers; ++i)
         {
-            workers.emplace_back([&inputQueue, &writer, i]()
+            workers.emplace_back([&inputQueue, &writer, &scheduler, i]()
                                  {
                 logMessage("[Worker " + std::to_string(i) + "] Started and waiting for tiles...");
                 Tile tile;
@@ -134,7 +136,9 @@ int main()
                 while (inputQueue.pop(tile)) {
                     logMessage("[Worker " + std::to_string(i) + "] Popped tile (" + std::to_string(tile.x) + "," + std::to_string(tile.y) + "). Processing...");
                     
-                    processTile(tile); // Do the heavy math
+                    //processTile(tile); // Do the heavy math 
+                    
+                    scheduler.dispatch(tile);
                     
                     logMessage("[Worker " + std::to_string(i) + "] Finished tile (" + std::to_string(tile.x) + "," + std::to_string(tile.y) + "). Submitting to Writer...");
                     writer.submit_tile(tile); 

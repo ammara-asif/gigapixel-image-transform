@@ -1,6 +1,3 @@
-# Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,c++,cmake
-# Edit at https://www.toptal.com/developers/gitignore?templates=visualstudiocode,c++,cmake
-
 ### C++ ###
 # Prerequisites
 *.d
@@ -73,6 +70,6 @@ CMakeUserPresets.json
 .history
 .ionide
 
-# End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,c++,cmake
-
-output.tiff
+#images
+*.tiff
+*.tif
