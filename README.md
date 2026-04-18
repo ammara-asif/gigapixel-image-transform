@@ -22,40 +22,45 @@ The system processes images in tiles to avoid loading the full image into memory
 ---
 
 ## Project Structure
-images/ -> Images sed for testing (.tiff)
-include/ → Header files (.h)
-src/ → Implementation files (.cpp)
-main.cpp → Entry point
-
+├── images/         # Test images (.tiff)
+├── include/        # Header files (.h)
+│   ├── Tile.h
+│   ├── IWorker.h
+│   ├── CPUWorker.h
+│   ├── GPUWorker.h
+│   ├── Scheduler.h
+│   ├── TileReader.h
+│   ├── BoundedTileQueue.h
+│   ├── OutputWriter.h
+│   └── Transform.h
+├── src/            # Implementation files (.cpp)
+│   ├── TileReader.cpp
+│   ├── OutputWriter.cpp
+│   └── Transform.cpp
+└── main.cpp        # Entry point and pipeline orchestration
 
 ---
 
 ## Build Instructions
 
-### Compile (Windows / MinGW)
+### Requirements
+
+| Dependency | Purpose |
+|---|---|
+| `g++` (GCC / MinGW) | Compiler |
+| `libtiff` | TIFF image I/O |
+| `OpenMP` | Parallel processing |
+| `pthread` | Thread management |
+
+### Compile (Linux / WSL / MinGW)
 
 ```bash
-g++ -Iinclude main.cpp src/TileReader.cpp src/OutputWriter.cpp src/transform.cpp -o main -ltiff -fopenmp -pthread
+g++ -Iinclude main.cpp src/TileReader.cpp src/OutputWriter.cpp src/Transform.cpp \
+    -o main -ltiff -fopenmp -pthread
 ```
 
-## Run
+### Run
+
+```bash
 ./main
-
-## Design Overview
-
-TileReader (Producer)
-        ↓
-Bounded Tile Queue
-        ↓
-Worker Threads (CPU + Scheduler)
-        ↓
-GPU / CPU Execution (Heterogeneous)
-        ↓
-OutputWriter (Streaming output)
-
-## Dependencies
-
-libtiff
-OpenMP
-pthread
-g++ (MinGW or GCC)
+```
