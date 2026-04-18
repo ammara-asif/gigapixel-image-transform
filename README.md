@@ -22,8 +22,12 @@ The system processes images in tiles to avoid loading the full image into memory
 ---
 
 ## Project Structure
-├── images/         # Test images (.tiff)
-├── include/        # Header files (.h)
+
+```
+gigapixel-pipeline/
+├── images/
+│   └── input.tiff
+├── include/
 │   ├── Tile.h
 │   ├── IWorker.h
 │   ├── CPUWorker.h
@@ -33,11 +37,12 @@ The system processes images in tiles to avoid loading the full image into memory
 │   ├── BoundedTileQueue.h
 │   ├── OutputWriter.h
 │   └── Transform.h
-├── src/            # Implementation files (.cpp)
+├── src/
 │   ├── TileReader.cpp
 │   ├── OutputWriter.cpp
 │   └── Transform.cpp
-└── main.cpp        # Entry point and pipeline orchestration
+└── main.cpp
+```
 
 ---
 
