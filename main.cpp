@@ -11,6 +11,7 @@
 #include "OutputWriter.h"
 #include "Transform.h"
 #include "Scheduler.h"
+#include "TileOptimizer.h"
 
 // --- Thread-Safe Console Logging ---
 std::mutex printMutex;
@@ -65,8 +66,18 @@ int main()
         TileReader reader("images/input.tiff");
         int overlap = 0;
 
-        logMessage("[Main] Computing optimal tile size based on memory budget...");
-        int tileSize = reader.computeTileSize(TILE_MEMORY_BUDGET, overlap);
+        logMessage("[Main] Computing optimal tile sizes based on device capabilities...");
+        
+        // Get device-specific tile sizes
+        int cpuTileSize = Scheduler::getOptimalTileSize(DeviceType::CPU);
+        int gpuTileSize = Scheduler::getOptimalTileSize(DeviceType::GPU);
+        
+        logMessage("[Main] Optimal tile sizes: CPU=" + std::to_string(cpuTileSize) + 
+                   "x" + std::to_string(cpuTileSize) + ", GPU=" + std::to_string(gpuTileSize) + 
+                   "x" + std::to_string(gpuTileSize));
+        
+        // Use CPU tile size for uniform processing (scheduler will adapt as needed)
+        int tileSize = cpuTileSize;
         tileSize = std::min(tileSize, 512); // TODO: remove when using BIGTIFF
 
         // std::vector<TileIndex> grid = reader.getTileGrid(tileSize);
@@ -111,8 +122,22 @@ int main()
         logMessage("[Main] Hardware cores detected: " + std::to_string(numCores));
         logMessage("[Main] Reserving 1 core for Reader, 1 for Writer. Spawning " + std::to_string(numWorkers) + " Worker threads.");
 
+        // =========================================================
+        // MILESTONE 2: Asynchronous GPU Transfers & Tile Optimization
+        // =========================================================
+        // The Scheduler now handles:
+        // 1. Asynchronous CUDA stream management for overlapping H2D, compute, D2H
+        // 2. Device-specific tile size optimization:
+        //    - CPU: Cache-optimized (512x512) for L3 cache efficiency
+        //    - GPU: Occupancy-optimized (1024x1024) for warp utilization
+        // 3. Intelligent device selection based on:
+        //    - Tile size and operation type
+        //    - Current device queue depths
+        //    - GPU availability and CUDA stream capacity
+        logMessage("[Main] Milestone 2: Async GPU transfers and tile optimization ENABLED");
+
         // We only need ONE queue now (Disk -> Workers)
-        BoundedTileQueue inputQueue(numWorkers * 2);
+        BoundedTileQueue inputQueue(static_cast<size_t>(numWorkers * 2));
         
         Scheduler scheduler;
         // ---------------------------------------------------------
