@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <cstdint>
+#include <cstddef>
 
 // Memory budget per tile. Total usage ≈ TILE_MEMORY_BUDGET * num_threads * 2 (double buffering).
 static constexpr size_t TILE_MEMORY_BUDGET = 32 * 1024 * 1024; // 32 MB
