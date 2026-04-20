@@ -3,102 +3,66 @@
 #include <vector>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
+#include <mutex>
+#include <cuda_runtime.h> // Added actual CUDA runtime
 
 /**
- * CUDAStreamManager: Manages CUDA streams for asynchronous data transfer
- * 
- * Supports overlapping of:
- * - H2D transfers (Host-to-Device)
- * - GPU computation
- * - D2H transfers (Device-to-Host)
- * 
- * Triple buffering pattern:
- *   - Stream 1: H2D for tile N+1 while Stream 0 computes on tile N
- *   - Stream 0: GPU computation on tile N
- *   - Stream 2: D2H for tile N-1 while both are busy
+ * CUDAStreamManager: Manages a pool of CUDA streams for async data transfer.
+ * * Architecture:
+ * - A Worker Thread acquires a single stream for the lifespan of a tile.
+ * - H2D, Compute, and D2H are queued sequentially onto that same stream.
+ * - Concurrency is achieved because multiple threads use different streams simultaneously.
  */
-class CUDAStreamManager {
+class CUDAStreamManager
+{
 public:
-    enum class StreamPurpose {
-        H2D_TRANSFER,      // Host-to-Device transfers
-        COMPUTATION,       // GPU kernel execution
-        D2H_TRANSFER,      // Device-to-Host transfers
-        SYNCHRONIZATION    // Synchronization operations
-    };
-
-    struct StreamInfo {
-        int streamId;
-        StreamPurpose purpose;
-        bool isAvailable;
-    };
-
     /**
-     * Initialize CUDA streams for asynchronous operations
-     * @param numStreams: Number of concurrent streams (default: 3 for triple buffering)
+     * Initialize CUDA streams
+     * @param numStreams: Should ideally match your Worker Thread count
      */
-    explicit CUDAStreamManager(int numStreams = 3);
+    explicit CUDAStreamManager(int numStreams = 4);
     ~CUDAStreamManager();
 
     /**
-     * Get an available stream for the specified purpose
-     * Returns nullptr if no stream available
+     * Blocks (or searches) for an available stream and returns its ID.
      */
-    void* getStream(StreamPurpose purpose);
+    int acquireStream();
 
     /**
-     * Mark a stream as available after async operation completes
+     * Launch async H2D transfer on a specific stream
      */
-    void releaseStream(int streamId);
+    void launchH2DTransfer(int streamId, void *dst, const void *src, size_t numBytes);
 
     /**
-     * Launch async H2D transfer
-     * @param dst: Device memory destination
-     * @param src: Host memory source
-     * @param numBytes: Number of bytes to transfer
+     * Launch async D2H transfer on a specific stream (Renamed from D2D)
      */
-    int launchH2DTransfer(void* dst, const void* src, size_t numBytes);
+    void launchD2HTransfer(int streamId, void *dst, const void *src, size_t numBytes);
 
     /**
-     * Launch async D2H transfer
-     * @param dst: Host memory destination
-     * @param src: Device memory source
-     * @param numBytes: Number of bytes to transfer
-     */
-    int launchD2DTransfer(void* dst, const void* src, size_t numBytes);
-
-    /**
-     * Synchronize all streams
-     */
-    void synchronizeAllStreams();
-
-    /**
-     * Synchronize a specific stream
+     * Block the calling CPU thread until all operations on this stream finish.
+     * Automatically releases the stream back to the pool.
      */
     void synchronizeStream(int streamId);
 
     /**
-     * Check if a stream has completed
+     * Synchronize all streams globally
      */
-    bool isStreamComplete(int streamId);
+    void synchronizeAllStreams();
 
     /**
-     * Get number of active streams
+     * Fetch the actual raw cudaStream_t for passing into Kernel launches
      */
+    cudaStream_t getRawCudaStream(int streamId) const;
+
     int getNumStreams() const;
-
-    /**
-     * Enable/disable profiling
-     */
     void enableProfiling(bool enable);
 
 private:
     int numStreams;
-    std::vector<void*> streams;           // CUDA stream handles
-    std::vector<bool> streamAvailable;    // Availability status
-    std::vector<StreamPurpose> streamPurpose;
+    std::vector<cudaStream_t> streams; // Actual CUDA stream handles
+    std::vector<bool> streamAvailable; // Availability status
+    std::mutex poolMutex;              // Thread safety for concurrent workers
     bool profilingEnabled;
 
-    // Helper to check CUDA errors
-    void checkCudaError(const char* operation);
+    void checkCudaError(cudaError_t status, const char *operation);
 };

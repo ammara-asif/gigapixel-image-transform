@@ -3,20 +3,21 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <cstdint>
 #include "Tile.h"
 #include "IWorker.h"
 #include "CUDAStreamManager.h"
 
 /**
  * AsyncGPUWorker: GPU worker with asynchronous data transfer
- * 
- * Features:
+ * * Features:
  * - CUDA streams for overlapping H2D, computation, and D2H
- * - Triple buffering for maximum pipeline efficiency
- * - Automatic device memory management
+ * - Centralized VRAM management (Receives pre-allocated buffers)
+ * - Automatic stream rotation
  * - Performance monitoring
  */
-class AsyncGPUWorker : public IWorker {
+class AsyncGPUWorker : public IWorker
+{
 public:
     AsyncGPUWorker();
     ~AsyncGPUWorker();
@@ -24,16 +25,26 @@ public:
     /**
      * Execute tile on GPU with async transfers
      * Overlaps:
-     *   H2D: Send tile data to device
-     *   Compute: Run GPU kernel on tile
-     *   D2H: Retrieve processed tile back to host
+     * H2D: Send tile data to device (using pre-allocated d_buffer)
+     * Compute: Run GPU kernel on tile
+     * D2H: Retrieve processed tile back to host
+     * * NOTE: Signature updated to accept the pre-allocated VRAM buffer.
+     * Ensure IWorker.h is also updated to match this signature if using polymorphism.
      */
-    void execute(Tile& tile) override;
+    void execute(Tile &tile, uint8_t *d_buffer);
+
+    // Keep the old signature for CPU fallback/interface compatibility if needed,
+    // but it should throw an error or route to the new one if called directly on GPU.
+    void execute(Tile &tile) override
+    {
+        throw std::runtime_error("AsyncGPUWorker requires a pre-allocated VRAM buffer. Call execute(tile, d_buffer) instead.");
+    }
 
     /**
      * Get GPU device info
      */
-    struct GPUInfo {
+    struct GPUInfo
+    {
         int deviceId;
         int computeCapability;
         size_t totalMemory;
@@ -58,19 +69,12 @@ private:
     std::unique_ptr<CUDAStreamManager> streamManager;
     GPUInfo gpuInfo;
     int currentGPU;
-    
-    // Device memory buffers (triple buffering)
-    struct DeviceBuffer {
-        void* data;
-        size_t size;
-        bool allocated;
-    };
-    std::vector<DeviceBuffer> deviceBuffers;
 
     // Pending operations tracking
-    struct PendingOp {
+    struct PendingOp
+    {
         int streamId;
-        void* deviceData;
+        uint8_t *deviceData;
         size_t dataSize;
     };
     std::queue<PendingOp> pendingOps;
@@ -82,27 +86,18 @@ private:
     void initializeGPU();
 
     /**
-     * Allocate device memory buffer
-     */
-    void allocateDeviceBuffer(DeviceBuffer& buffer, size_t sizeBytes);
-
-    /**
-     * Free device memory buffer
-     */
-    void freeDeviceBuffer(DeviceBuffer& buffer);
-
-    /**
      * Execute GPU kernel on device buffer
      */
-    void executeGPUKernel(Tile& tile, void* deviceData, int streamId);
+    void executeGPUKernel(Tile &tile, uint8_t *deviceData, int streamId);
 
     /**
      * Handle async transfer completion
      */
-    void onTransferComplete(PendingOp& op);
+    void onTransferComplete(PendingOp &op);
 
     // Performance monitoring
-    struct PerfStats {
+    struct PerfStats
+    {
         double h2dTime;
         double computeTime;
         double d2hTime;

@@ -60,7 +60,8 @@ void TileReader::readScanline(int x, int y, Tile &tile)
 
             for (int c = 0; c < channels; c++)
             {
-                tile.data[(row * tile.width + col) * channels + c] =
+                // UPDATED: Using getRawPtr() instead of .data[]
+                tile.getRawPtr()[(row * tile.width + col) * channels + c] =
                     rowBuffer[(imgCol * channels) + c];
             }
         }
@@ -73,7 +74,6 @@ void TileReader::readTiled(int x, int y, Tile &tile)
     uint32_t nativeTileW, nativeTileH;
     TIFFGetField(tif, TIFFTAG_TILEWIDTH, &nativeTileW);
     TIFFGetField(tif, TIFFTAG_TILELENGTH, &nativeTileH);
-    // std::cout<<"Native tile: "<<nativeTileH<<"x"<<nativeTileW<<std::endl;
 
     // Temporary buffer for one native TIFF tile
     nativeTileBuf.resize(nativeTileW * nativeTileH * channels);
@@ -88,7 +88,6 @@ void TileReader::readTiled(int x, int y, Tile &tile)
     {
         for (int tc = tileStartCol; tc <= tileEndCol; tc++)
         {
-
             // Pixel origin of this native tile in image coordinates
             int nativeOriginX = tc * nativeTileW;
             int nativeOriginY = tr * nativeTileH;
@@ -112,7 +111,6 @@ void TileReader::readTiled(int x, int y, Tile &tile)
             {
                 for (int px = srcX0; px < srcX1; px++)
                 {
-
                     // Position in native tile buffer
                     int nativeCol = px - nativeOriginX;
                     int nativeRow = py - nativeOriginY;
@@ -124,7 +122,10 @@ void TileReader::readTiled(int x, int y, Tile &tile)
                     int outIdx = (outRow * tile.width + outCol) * channels;
 
                     for (int c = 0; c < channels; c++)
-                        tile.data[outIdx + c] = nativeTileBuf[nativeIdx + c];
+                    {
+                        // UPDATED: Using getRawPtr() instead of .data[]
+                        tile.getRawPtr()[outIdx + c] = nativeTileBuf[nativeIdx + c];
+                    }
                 }
             }
         }
@@ -159,7 +160,10 @@ Tile TileReader::getTile(int x, int y, int width, int height, int overlap)
     tile.width = readWidth;
     tile.height = readHeight;
     tile.overlap = overlap;
-    tile.data.resize(readWidth * readHeight * channels);
+    tile.operation = TransformOperation::GRAYSCALE; // Make sure to set a default or assign it later
+
+    // UPDATED: Allocate pinned memory instead of resizing a std::vector
+    tile.allocate(readWidth * readHeight * channels);
 
     // read data
     if (TIFFIsTiled(tif))
@@ -179,7 +183,7 @@ int TileReader::computeTileSize(size_t targetMemoryBytes, int overlap)
     size_t tileArea = targetMemoryBytes / channels;
     int tileSize = static_cast<int>(sqrt((double)tileArea)) - 2 * overlap;
 
-    // Clamp minimum size(avod tiny tiles)
+    // Clamp minimum size(avoid tiny tiles)
     tileSize = std::max(tileSize, 128);
 
     // Align to TIFF tile if exists

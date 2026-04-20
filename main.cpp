@@ -12,7 +12,7 @@
 #include "Transform.h"
 #include "Scheduler.h"
 #include "TileOptimizer.h"
-
+#include "VramManager.h"
 // --- Thread-Safe Console Logging ---
 std::mutex printMutex;
 void logMessage(const std::string &msg)
@@ -67,21 +67,18 @@ int main()
         int overlap = 0;
 
         logMessage("[Main] Computing optimal tile sizes based on device capabilities...");
-        
+
         // Get device-specific tile sizes
         int cpuTileSize = Scheduler::getOptimalTileSize(DeviceType::CPU);
         int gpuTileSize = Scheduler::getOptimalTileSize(DeviceType::GPU);
-        
-        logMessage("[Main] Optimal tile sizes: CPU=" + std::to_string(cpuTileSize) + 
-                   "x" + std::to_string(cpuTileSize) + ", GPU=" + std::to_string(gpuTileSize) + 
+
+        logMessage("[Main] Optimal tile sizes: CPU=" + std::to_string(cpuTileSize) +
+                   "x" + std::to_string(cpuTileSize) + ", GPU=" + std::to_string(gpuTileSize) +
                    "x" + std::to_string(gpuTileSize));
-        
+
         // Use CPU tile size for uniform processing (scheduler will adapt as needed)
         int tileSize = cpuTileSize;
         tileSize = std::min(tileSize, 512); // TODO: remove when using BIGTIFF
-
-        // std::vector<TileIndex> grid = reader.getTileGrid(tileSize);
-        // logMessage("[Main] Grid calculated. Total tiles to process: " + std::to_string(grid.size()));
 
         int input_w = reader.getImageWidth();
         int input_h = reader.getImageHeight();
@@ -112,7 +109,6 @@ int main()
             imgChannels,
             0,
             tileSize,
-            // TODO: set to true for bigtiff
             false); // Use BigTIFF if set to True
 
         // Hardware concurrency setup
@@ -123,23 +119,27 @@ int main()
         logMessage("[Main] Reserving 1 core for Reader, 1 for Writer. Spawning " + std::to_string(numWorkers) + " Worker threads.");
 
         // =========================================================
-        // MILESTONE 2: Asynchronous GPU Transfers & Tile Optimization
+        // MILESTONE 3: Memory Manager (VRAM Pool Initialization)
         // =========================================================
-        // The Scheduler now handles:
-        // 1. Asynchronous CUDA stream management for overlapping H2D, compute, D2H
-        // 2. Device-specific tile size optimization:
-        //    - CPU: Cache-optimized (512x512) for L3 cache efficiency
-        //    - GPU: Occupancy-optimized (1024x1024) for warp utilization
-        // 3. Intelligent device selection based on:
-        //    - Tile size and operation type
-        //    - Current device queue depths
-        //    - GPU availability and CUDA stream capacity
-        logMessage("[Main] Milestone 2: Async GPU transfers and tile optimization ENABLED");
+        logMessage("[Main] Milestone 3: Initializing VRAM Manager Pool...");
 
-        // We only need ONE queue now (Disk -> Workers)
+        // Calculate the maximum possible size for a tile in bytes
+        // Using the larger GPU tile size to ensure buffers are big enough
+        size_t maxTileBytes = gpuTileSize * gpuTileSize * imgChannels * sizeof(uint8_t);
+
+        // Allocate 1 buffer per worker, plus 2 extra for smooth overlapping
+        VramManager vramPool(numWorkers + 2, maxTileBytes);
+
+        logMessage("[Main] Pre-allocated " + std::to_string(numWorkers + 2) + " GPU buffers.");
+
+        // =========================================================
+        // MILESTONE 2/4: Asynchronous GPU Transfers & Tile Optimization
+        // =========================================================
+        logMessage("[Main] Milestone 2 & 4: Async GPU transfers and tile optimization ENABLED");
+
         BoundedTileQueue inputQueue(static_cast<size_t>(numWorkers * 2));
-        
         Scheduler scheduler;
+
         // ---------------------------------------------------------
         // Start the Writer Thread
         // ---------------------------------------------------------
@@ -153,17 +153,24 @@ int main()
         std::vector<std::thread> workers;
         for (unsigned int i = 0; i < numWorkers; ++i)
         {
-            workers.emplace_back([&inputQueue, &writer, &scheduler, i]()
+            // ADDED: Capture vramPool by reference
+            workers.emplace_back([&inputQueue, &writer, &scheduler, &vramPool, i]()
                                  {
                 logMessage("[Worker " + std::to_string(i) + "] Started and waiting for tiles...");
                 Tile tile;
                 
                 while (inputQueue.pop(tile)) {
-                    logMessage("[Worker " + std::to_string(i) + "] Popped tile (" + std::to_string(tile.x) + "," + std::to_string(tile.y) + "). Processing...");
+                    logMessage("[Worker " + std::to_string(i) + "] Popped tile (" + std::to_string(tile.x) + "," + std::to_string(tile.y) + "). Requesting VRAM...");
                     
-                    //processTile(tile); // Do the heavy math 
+                    // 1. Acquire a pre-allocated GPU buffer from the pool (Blocks if none available)
+                    uint8_t* d_buffer = vramPool.acquireBuffer();
                     
-                    scheduler.dispatch(tile);
+                    // 2. Dispatch to the Scheduler (We pass the VRAM buffer so the Scheduler doesn't have to allocate it)
+                    // NOTE to teammate doing Milestone 4: Update `scheduler.dispatch` to accept (Tile&, uint8_t*)
+                    scheduler.dispatch(tile, d_buffer); 
+                    
+                    // 3. Return the buffer to the pool immediately so another thread can use it
+                    vramPool.releaseBuffer(d_buffer);
                     
                     logMessage("[Worker " + std::to_string(i) + "] Finished tile (" + std::to_string(tile.x) + "," + std::to_string(tile.y) + "). Submitting to Writer...");
                     writer.submit_tile(tile); 
@@ -177,29 +184,22 @@ int main()
         // ---------------------------------------------------------
         logMessage("[Main/Reader] Pipeline fully active. Beginning disk reads...");
 
-        // Calculate total tiles so the logger knows the progress
         int nTilesX = (output_w + tileSize - 1) / tileSize;
         int nTilesY = (output_h + tileSize - 1) / tileSize;
         int totalTiles = nTilesX * nTilesY;
-
         int tilesRead = 0;
 
-        // Loop over the OUTPUT dimensions
         for (int out_y = 0; out_y < output_h; out_y += tileSize)
         {
             for (int out_x = 0; out_x < output_w; out_x += tileSize)
             {
-
-                // Calculate actual size of this output tile (handling edge clamps)
                 int tile_w = std::min(tileSize, output_w - out_x);
                 int tile_h = std::min(tileSize, output_h - out_y);
 
-                // --- DYNAMIC MAPPING LOGIC ---
                 int in_x, in_y, read_w, read_h;
 
                 if (currentOp == TransformOperation::ROTATE_90_CW)
                 {
-                    // Inverse Mapping for Rotation
                     in_x = out_y;
                     in_y = input_h - out_x - tile_w;
                     read_w = tile_h;
@@ -207,7 +207,6 @@ int main()
                 }
                 else
                 {
-                    // Forward Mapping for Grayscale / Point Operations
                     in_x = out_x;
                     in_y = out_y;
                     read_w = tile_w;
@@ -222,8 +221,7 @@ int main()
 
                 loadedTile.out_x = out_x;
                 loadedTile.out_y = out_y;
-                loadedTile.operation = currentOp; // Pass the flag to the worker
-
+                loadedTile.operation = currentOp;
                 loadedTile.x = out_x;
                 loadedTile.y = out_y;
 
@@ -234,21 +232,19 @@ int main()
 
         // --- Graceful Shutdown Sequence ---
         logMessage("[Main] All tiles read from disk. Sending 'Finished' signal to Input Queue.");
-        inputQueue.setFinished(); // 1. Tell workers no more input is coming
+        inputQueue.setFinished();
 
         logMessage("[Main] Waiting for Worker threads to clear the remaining queue...");
         for (auto &worker : workers)
         {
-            worker.join(); // 2. Wait for workers to finish all processing
+            worker.join();
         }
         logMessage("[Main] All Worker threads have successfully joined (shutdown).");
 
         logMessage("[Main] Finalizing Output Writer (pushing sentinel and waiting)...");
-        // 3. Tell your writer to push the nullptr sentinel and spin-wait for done_
         writer.finalize();
 
         logMessage("[Main] Joining Writer thread...");
-        // 4. Join the writer thread to ensure clean OS cleanup
         writerThread.join();
 
         logMessage("[Main] Pipeline integration complete. Image processed and saved.");
