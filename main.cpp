@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <string>
 #include <mutex>
+#include <memory>
 
 #include "TileReader.h"
 #include "Tile.h"
@@ -13,7 +14,7 @@
 #include "Scheduler.h"
 #include "TileOptimizer.h"
 #include "VramManager.h"
-
+#include "PipelineComposition.h"
 // --- Thread-Safe Console Logging ---
 std::mutex printMutex;
 void logMessage(const std::string &msg)
@@ -22,42 +23,156 @@ void logMessage(const std::string &msg)
     std::cout << msg << std::endl;
 }
 
+/**
+ * Display pipeline menu and return user's choice
+ */
+std::shared_ptr<TransformPipeline> showPipelineMenu()
+{
+    std::cout << "\n";
+    std::cout << "======================================\n";
+    std::cout << " Milestone 3: Pipeline Composition\n";
+    std::cout << "======================================\n";
+    std::cout << "1. Single Grayscale (Baseline)\n";
+    std::cout << "2. Single Rotate 90° CW (Baseline)\n";
+    std::cout << "3. Rotate → Resize → Grayscale (Pre-built)\n";
+    std::cout << "4. Rotate → Gaussian → Color Correct (Pre-built)\n";
+    std::cout << "5. Gaussian → Sobel (Edge Detection)\n";
+    std::cout << "6. Median → Gaussian (Noise Reduction)\n";
+    std::cout << "7. Custom Pipeline Builder\n";
+    std::cout << "Select option (1-7): ";
+
+    int choice = 0;
+    while (!(std::cin >> choice) || (choice < 1 || choice > 7))
+    {
+        std::cout << "Invalid input. Please enter 1-7: ";
+        std::cin.clear();
+        std::cin.ignore(10000, '\n');
+    }
+
+    std::cin.ignore(10000, '\n'); // Clear input buffer
+
+    auto pipeline = std::make_shared<TransformPipeline>();
+
+    switch (choice)
+    {
+    case 1:
+        pipeline = std::make_shared<TransformPipeline>("grayscale");
+        pipeline->add(TransformOperation::GRAYSCALE);
+        std::cout << "\n[Pipeline] Selected: Single Grayscale\n";
+        break;
+
+    case 2:
+        pipeline = std::make_shared<TransformPipeline>("rotate_cw");
+        pipeline->add(TransformOperation::ROTATE_90_CW);
+        std::cout << "\n[Pipeline] Selected: Single Rotate 90° CW\n";
+        break;
+
+    case 3:
+        pipeline = PipelineComposer::rotateResizeGrayscale(0.5f, 0.5f);
+        std::cout << "\n[Pipeline] Selected: Rotate → Resize (0.5x) → Grayscale\n";
+        break;
+
+    case 4:
+        pipeline = PipelineComposer::rotateFilterColorCorrect(5, 1.0f);
+        std::cout << "\n[Pipeline] Selected: Rotate → Gaussian (5x5) → Color Correct\n";
+        break;
+
+    case 5:
+        pipeline = PipelineComposer::edgeDetectionPipeline();
+        std::cout << "\n[Pipeline] Selected: Gaussian (3x3) → Sobel Edge Detection\n";
+        break;
+
+    case 6:
+        pipeline = PipelineComposer::noiseReductionPipeline();
+        std::cout << "\n[Pipeline] Selected: Median (5x5) → Gaussian (3x3) Noise Reduction\n";
+        break;
+
+    case 7:
+    {
+        std::cout << "\n[Pipeline Builder] Custom Pipeline Construction\n";
+        std::cout << "Available Transforms:\n";
+        std::cout << "  0. IDENTITY\n";
+        std::cout << "  1. GRAYSCALE\n";
+        std::cout << "  2. ROTATE_90_CW\n";
+        std::cout << "  3. RESIZE\n";
+        std::cout << "  4. COLOR_CORRECTION\n";
+        std::cout << "  5. FILTER_GAUSSIAN\n";
+        std::cout << "  6. FILTER_MEDIAN\n";
+        std::cout << "  7. FILTER_SOBEL\n";
+
+        pipeline = std::make_shared<TransformPipeline>("custom");
+
+        int numStages = 0;
+        std::cout << "\nHow many stages? (1-5): ";
+        std::cin >> numStages;
+        numStages = std::max(1, std::min(numStages, 5));
+
+        for (int i = 0; i < numStages; ++i)
+        {
+            std::cout << "Stage " << (i + 1) << " - Transform (0-7): ";
+            int op = 0;
+            std::cin >> op;
+            op = std::max(0, std::min(op, 7));
+
+            TransformOperation opType = static_cast<TransformOperation>(op);
+
+            // Get parameters if needed
+            TransformParams params;
+            if (op == 3) // RESIZE
+            {
+                std::cout << "  Scale X (0.1-2.0): ";
+                std::cin >> params.scaleX;
+                std::cout << "  Scale Y (0.1-2.0): ";
+                std::cin >> params.scaleY;
+                params.scaleX = std::max(0.1f, std::min(params.scaleX, 2.0f));
+                params.scaleY = std::max(0.1f, std::min(params.scaleY, 2.0f));
+            }
+            else if (op == 4) // COLOR_CORRECTION
+            {
+                std::cout << "  Brightness (-100 to 100): ";
+                std::cin >> params.brightness;
+                std::cout << "  Contrast (0.5 to 2.0): ";
+                std::cin >> params.contrast;
+            }
+            else if (op == 5 || op == 6) // GAUSSIAN, MEDIAN
+            {
+                std::cout << "  Kernel Size (3, 5, 7, 9): ";
+                int ks = 3;
+                std::cin >> ks;
+                params.kernelSize = (ks % 2 == 1) ? ks : ks + 1;
+            }
+
+            pipeline->add(opType, params);
+        }
+
+        std::cout << "\n[Pipeline Builder] Custom pipeline created: " << pipeline->describe() << "\n";
+        break;
+    }
+
+    default:
+        pipeline = std::make_shared<TransformPipeline>("grayscale");
+        pipeline->add(TransformOperation::GRAYSCALE);
+        break;
+    }
+
+    std::cout << "[Pipeline] Pipeline stages: " << pipeline->getStageCount() << "\n";
+    std::cout << "[Pipeline] Description: " << pipeline->describe() << "\n";
+    std::cout << "[Pipeline] Point operation only: " << (pipeline->isSimplePointOperation() ? "Yes" : "No") << "\n";
+    std::cout << "[Pipeline] Requires overlap: " << (pipeline->requiresOverlapRegion() ? "Yes" : "No") << "\n";
+
+    return pipeline;
+}
+
 int main()
 {
     try
     {
-        logMessage("[Main] Starting Gigapixel Processing Pipeline...");
+        logMessage("[Main] Starting Gigapixel Processing Pipeline (Milestone 3 - Pipeline Composition)...");
 
         // =========================================================
-        // USER INPUT: Select the Transformation
+        // MILESTONE 3: Pipeline Selection
         // =========================================================
-
-        int userChoice = 0;
-        std::cout << "======================================\n";
-        std::cout << " Gigapixel Image Transform Pipeline\n";
-        std::cout << "======================================\n";
-        std::cout << "1. Grayscale (Point Operation)\n";
-        std::cout << "2. Rotate 90 CW (Geometric Inverse Map)\n";
-        std::cout << "Select an operation (1 or 2): ";
-
-        while (!(std::cin >> userChoice) || (userChoice < 1 || userChoice > 2))
-        {
-            std::cout << "Invalid input. Please enter 1 or 2: ";
-            std::cin.clear();             // clear error flags
-            std::cin.ignore(10000, '\n'); // discard bad input
-        }
-
-        TransformOperation currentOp;
-        if (userChoice == 2)
-        {
-            currentOp = TransformOperation::ROTATE_90_CW;
-            logMessage("\n[Main] User selected: ROTATE 90 CW");
-        }
-        else
-        {
-            currentOp = TransformOperation::GRAYSCALE;
-            logMessage("\n[Main] User selected: GRAYSCALE");
-        }
+        auto pipeline = showPipelineMenu();
 
         // =========================================================
         // Tile Reader Config
@@ -65,7 +180,7 @@ int main()
 
         logMessage("[Main] Initializing TileReader for 'input.tiff'...");
         TileReader reader("images/input.tiff");
-        int overlap = 0;
+        int overlap = pipeline->computeRequiredOverlap();
 
         logMessage("[Main] Computing optimal tile sizes based on device capabilities...");
 
@@ -86,18 +201,28 @@ int main()
         int imgChannels = reader.getChannels();
 
         // =========================================================
-        // PIPELINE CONFIGURATION: Change this flag to swap algorithms!
+        // PIPELINE CONFIGURATION: Calculate Output Dimensions
         // =========================================================
 
-        // Calculate Output Dimensions dynamically
         int output_w = input_w;
         int output_h = input_h;
 
-        if (currentOp == TransformOperation::ROTATE_90_CW)
+        // Calculate output dimensions based on pipeline
+        for (size_t i = 0; i < pipeline->getStageCount(); ++i)
         {
-            output_w = input_h; // Swap dimensions for 90 CW
-            output_h = input_w;
+            const auto& stage = pipeline->getStage(i);
+            if (stage.operation == TransformOperation::ROTATE_90_CW)
+            {
+                std::swap(output_w, output_h);
+            }
+            else if (stage.operation == TransformOperation::RESIZE)
+            {
+                output_w = static_cast<int>(output_w * stage.params.scaleX);
+                output_h = static_cast<int>(output_h * stage.params.scaleY);
+            }
         }
+
+        logMessage("[Main] Output dimensions: " + std::to_string(output_w) + "x" + std::to_string(output_h));
 
         // ---------------------------------------------------------
         // INITIALIZE YOUR WRITER
@@ -120,13 +245,13 @@ int main()
         logMessage("[Main] Reserving 1 core for Reader, 1 for Writer. Spawning " + std::to_string(numWorkers) + " Worker threads.");
 
         // =========================================================
-        // Memory Manager (VRAM Pool Initialization)
+        // MILESTONE 3: Memory Manager (VRAM Pool Initialization)
         // =========================================================
-        logMessage("[Main] Initializing VRAM Manager Pool...");
+        logMessage("[Main] Milestone 3: Initializing VRAM Manager Pool...");
 
         // Calculate the maximum possible size for a tile in bytes
         // Using the larger GPU tile size to ensure buffers are big enough
-        size_t maxTileBytes = gpuTileSize * gpuTileSize * (imgChannels+1) * sizeof(uint8_t);
+        size_t maxTileBytes = gpuTileSize * gpuTileSize * imgChannels * sizeof(uint8_t);
 
         // Allocate 1 buffer per worker, plus 2 extra for smooth overlapping
         VramManager vramPool(numWorkers + 2, maxTileBytes);
@@ -134,9 +259,9 @@ int main()
         logMessage("[Main] Pre-allocated " + std::to_string(numWorkers + 2) + " GPU buffers.");
 
         // =========================================================
-        // Asynchronous GPU Transfers & Tile Optimization
+        // MILESTONE 2/4: Asynchronous GPU Transfers & Tile Optimization
         // =========================================================
-        logMessage("[Main] Async GPU transfers and tile optimization ENABLED");
+        logMessage("[Main] Milestone 2 & 4: Async GPU transfers and tile optimization ENABLED");
 
         BoundedTileQueue inputQueue(static_cast<size_t>(numWorkers * 2));
         Scheduler scheduler;
@@ -154,8 +279,8 @@ int main()
         std::vector<std::thread> workers;
         for (unsigned int i = 0; i < numWorkers; ++i)
         {
-            // ADDED: Capture vramPool by reference
-            workers.emplace_back([&inputQueue, &writer, &scheduler, &vramPool, i]()
+            // ADDED: Capture pipeline by value for worker threads
+            workers.emplace_back([&inputQueue, &writer, &scheduler, &vramPool, pipeline, i]()
                                  {
                 logMessage("[Worker " + std::to_string(i) + "] Started and waiting for tiles...");
                 Tile tile;
@@ -163,11 +288,13 @@ int main()
                 while (inputQueue.pop(tile)) {
                     logMessage("[Worker " + std::to_string(i) + "] Popped tile (" + std::to_string(tile.x) + "," + std::to_string(tile.y) + "). Requesting VRAM...");
                     
+                    // Set pipeline for this tile
+                    tile.setPipeline(pipeline);
+                    
                     // 1. Acquire a pre-allocated GPU buffer from the pool (Blocks if none available)
                     uint8_t* d_buffer = vramPool.acquireBuffer();
                     
                     // 2. Dispatch to the Scheduler (We pass the VRAM buffer so the Scheduler doesn't have to allocate it)
-                    // NOTE to teammate doing Milestone 4: Update `scheduler.dispatch` to accept (Tile&, uint8_t*)
                     scheduler.dispatch(tile, d_buffer); 
                     
                     // 3. Return the buffer to the pool immediately so another thread can use it
@@ -199,7 +326,10 @@ int main()
 
                 int in_x, in_y, read_w, read_h;
 
-                if (currentOp == TransformOperation::ROTATE_90_CW)
+                // For pipeline: handle coordinate mapping based on first stage only (simplified)
+                // For production: would need more sophisticated mapping
+                if (pipeline->getStageCount() > 0 && 
+                    pipeline->getStage(0).operation == TransformOperation::ROTATE_90_CW)
                 {
                     in_x = out_y;
                     in_y = input_h - out_x - tile_w;
@@ -222,7 +352,6 @@ int main()
 
                 loadedTile.out_x = out_x;
                 loadedTile.out_y = out_y;
-                loadedTile.operation = currentOp;
                 loadedTile.x = out_x;
                 loadedTile.y = out_y;
 
@@ -248,7 +377,8 @@ int main()
         logMessage("[Main] Joining Writer thread...");
         writerThread.join();
 
-        logMessage("[Main] Pipeline integration complete. Image processed and saved.");
+        logMessage("[Main] Pipeline composition complete. Image processed and saved to output.tiff");
+        std::cout << "\n[Success] Processing completed!\n";
     }
     catch (const std::exception &e)
     {
