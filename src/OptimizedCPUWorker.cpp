@@ -82,8 +82,13 @@ void OptimizedCPUWorker::processWithCacheOptimization(Tile& tile) {
 void OptimizedCPUWorker::grayscaleOptimized(Tile& tile) {
     std::cout << "[OptimizedCPUWorker] Running cache-optimized grayscale" << std::endl;
 
-    int channels = tile.data.size() / (tile.width * tile.height);
-    size_t numPixels = tile.width * tile.height;
+    uint8_t* data = tile.getRawPtr();
+    if (!data || tile.dataSizeBytes == 0 || tile.width <= 0 || tile.height <= 0) {
+        throw std::runtime_error("Invalid tile buffer for grayscale optimization");
+    }
+
+    const size_t numPixels = static_cast<size_t>(tile.width) * static_cast<size_t>(tile.height);
+    const size_t channels = std::max<size_t>(1, tile.dataSizeBytes / numPixels);
 
     // Process in cache-friendly strips
     // Strip size targets L1 cache per core
@@ -97,15 +102,15 @@ void OptimizedCPUWorker::grayscaleOptimized(Tile& tile) {
             for (int dy = 0; dy < h; ++dy) {
                 size_t idx = ((y + dy) * tile.width + x) * channels;
                 
-                uint8_t r = tile.data[idx];
-                uint8_t g = tile.data[idx + 1];
-                uint8_t b = tile.data[idx + 2];
+                uint8_t r = data[idx];
+                uint8_t g = data[idx + 1];
+                uint8_t b = data[idx + 2];
 
                 uint8_t gray = static_cast<uint8_t>(0.299 * r + 0.587 * g + 0.114 * b);
 
-                tile.data[idx] = gray;
-                tile.data[idx + 1] = gray;
-                tile.data[idx + 2] = gray;
+                data[idx] = gray;
+                data[idx + 1] = gray;
+                data[idx + 2] = gray;
             }
         }
     }
@@ -117,8 +122,19 @@ void OptimizedCPUWorker::grayscaleOptimized(Tile& tile) {
 void OptimizedCPUWorker::rotateOptimized(Tile& tile) {
     std::cout << "[OptimizedCPUWorker] Running cache-optimized rotation" << std::endl;
 
-    int channels = tile.data.size() / (tile.width * tile.height);
-    std::vector<uint8_t> rotated_buffer(tile.data.size(), 0);
+    uint8_t* data = tile.getRawPtr();
+    if (!data || tile.dataSizeBytes == 0 || tile.width <= 0 || tile.height <= 0) {
+        throw std::runtime_error("Invalid tile buffer for rotation optimization");
+    }
+
+    const size_t numPixels = static_cast<size_t>(tile.width) * static_cast<size_t>(tile.height);
+    const size_t channels = std::max<size_t>(1, tile.dataSizeBytes / numPixels);
+
+    uint8_t* rotated_raw = nullptr;
+    if (cudaMallocHost((void**)&rotated_raw, tile.dataSizeBytes) != cudaSuccess || rotated_raw == nullptr) {
+        throw std::runtime_error("Failed to allocate pinned buffer for rotated tile");
+    }
+    std::memset(rotated_raw, 0, tile.dataSizeBytes);
 
     // Use block transpose for better cache locality
     // Block size targets L2 cache
@@ -140,7 +156,7 @@ void OptimizedCPUWorker::rotateOptimized(Tile& tile) {
                     size_t dst_idx = (dst_y * tile.height + dst_x) * channels;
 
                     for (int c = 0; c < channels; ++c) {
-                        rotated_buffer[dst_idx + c] = tile.data[src_idx + c];
+                        rotated_raw[dst_idx + c] = data[src_idx + c];
                     }
                 }
             }
@@ -152,7 +168,7 @@ void OptimizedCPUWorker::rotateOptimized(Tile& tile) {
     tile.width = tile.height;
     tile.height = temp;
 
-    tile.data = std::move(rotated_buffer);
+    tile.data = std::shared_ptr<uint8_t>(rotated_raw, CudaHostDeleter());
 
     perfStats.executionTime = 0.0;
     perfStats.cacheHitRate = 0.90; // Block-wise is good but not as good as sequential
@@ -165,10 +181,4 @@ void OptimizedCPUWorker::recordPerformance()
 {
     // TODO: Implement actual performance monitoring
     // Could collect cache misses, memory bandwidth, etc.
-}
-
-void OptimizedCPUWorker::recordPerformance() {
-    // In a real implementation, this would use performance counters
-    // For now, just logging indicators
-    std::cout << "[OptimizedCPUWorker] Cache hit rate: " << (perfStats.cacheHitRate * 100) << "%" << std::endl;
 }

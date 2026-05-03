@@ -293,4 +293,4 @@ namespace PipelineComposer
     }
 }
 
-#endif // PIPELINECOMPOSITION_H
+

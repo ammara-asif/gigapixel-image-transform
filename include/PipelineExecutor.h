@@ -111,4 +111,3 @@ public:
                                       const std::shared_ptr<TransformPipeline>& pipeline);
 };
 
-#endif // PIPELINEEXECUTOR_H

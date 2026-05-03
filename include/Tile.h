@@ -8,8 +8,11 @@
 #include <cuda_runtime.h> // Required for CUDA memory APIs
 #include "TransformType.h"
 
-// Forward declaration for pipeline support
-class TransformPipeline;
+// Include full pipeline definition because Tile::usePipeline() calls
+// `getStageCount()` which requires the complete type.
+#include "PipelineComposition.h"
+
+// (PipelineComposition.h is included above; no forward declaration needed)
 
 // Memory budget per tile. Total usage ≈ TILE_MEMORY_BUDGET * num_threads * 2 (double buffering).
 static constexpr size_t TILE_MEMORY_BUDGET = 32 * 1024 * 1024; // 32 MB
