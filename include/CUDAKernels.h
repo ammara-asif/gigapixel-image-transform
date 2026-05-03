@@ -9,7 +9,7 @@ bool gpuSupportsOperation(TransformOperation operation);
 
 // Executes a tile on CUDA and writes results back into tile.data.
 // Returns false when CUDA path is unavailable or execution fails.
-bool processTileCuda(Tile& tile);
+bool processTileCuda(Tile& tile, uint8_t* d_buffer, cudaStream_t stream);
 
 #else
 

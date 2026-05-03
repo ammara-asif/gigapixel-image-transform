@@ -157,45 +157,79 @@ bool gpuSupportsOperation(TransformOperation operation)
     return operation == TransformOperation::GRAYSCALE;
 }
 
-bool processTileCuda(Tile& tile)
+bool processTileCuda(Tile& tile, uint8_t* d_buffer, cudaStream_t stream)
 {
-    if (!gpuSupportsOperation(tile.operation)) {
+    if (!gpuSupportsOperation(tile.operation))
         return false;
-    }
 
-    if (tile.data.empty() || tile.width <= 0 || tile.height <= 0) {
+    if (!tile.getRawPtr() || tile.dataSizeBytes == 0 || tile.width <= 0 || tile.height <= 0)
         return false;
-    }
 
     const size_t numPixels = static_cast<size_t>(tile.width) * static_cast<size_t>(tile.height);
-    const size_t channels = tile.data.size() / numPixels;
-    if (channels != 3) {
+    const size_t channels = tile.dataSizeBytes / numPixels;
+    if (channels != 3)
+        return false;
+
+    // Carve two non-overlapping regions out of d_buffer.
+    // d_rgb  : first numPixels * 3 bytes  (input, reinterpreted as uchar3)
+    // d_gray : next  numPixels * 1 bytes  (output)
+    uchar3*  d_rgb  = reinterpret_cast<uchar3*>(d_buffer);
+    uint8_t* d_gray = d_buffer + numPixels * sizeof(uchar3);
+
+    // H2D: copy pinned host memory → device (async on the caller's stream)
+    cudaError_t err = cudaMemcpyAsync(
+        d_rgb,
+        tile.getRawPtr(),           // pinned host memory allocated by Tile::allocate()
+        numPixels * sizeof(uchar3),
+        cudaMemcpyHostToDevice,
+        stream);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "processTileCuda H2D failed: %s\n", cudaGetErrorString(err));
         return false;
     }
 
-    uchar3* d_rgb = nullptr;
-    uint8_t* d_gray = nullptr;
+    // Kernel: RGB → gray on the same stream (executes after H2D completes)
+    cuda_kernels::launchRgbToGray(d_rgb, d_gray, tile.width, tile.height, stream);
 
-    CUDA_CHECK(cudaMalloc(&d_rgb, numPixels * sizeof(uchar3)));
-    CUDA_CHECK(cudaMalloc(&d_gray, numPixels * sizeof(uint8_t)));
-    CUDA_CHECK(cudaMemcpy(d_rgb, tile.data.data(), numPixels * sizeof(uchar3), cudaMemcpyHostToDevice));
-
-    cuda_kernels::launchRgbToGray(d_rgb, d_gray, tile.width, tile.height, nullptr);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    std::vector<uint8_t> gray(numPixels);
-    CUDA_CHECK(cudaMemcpy(gray.data(), d_gray, numPixels * sizeof(uint8_t), cudaMemcpyDeviceToHost));
-
-    for (size_t i = 0; i < numPixels; ++i) {
-        uint8_t g = gray[i];
-        tile.data[i * 3 + 0] = g;
-        tile.data[i * 3 + 1] = g;
-        tile.data[i * 3 + 2] = g;
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "processTileCuda kernel launch failed: %s\n", cudaGetErrorString(err));
+        return false;
     }
 
-    cudaFree(d_gray);
-    cudaFree(d_rgb);
+    // D2H: gray result → host, expanding 1-channel result back to 3-channel layout
+    // We use a temporary single-channel host buffer, then expand in-place.
+    // This avoids needing a second pinned host allocation here.
+    std::vector<uint8_t> gray_host(numPixels);
+    err = cudaMemcpyAsync(
+        gray_host.data(),
+        d_gray,
+        numPixels * sizeof(uint8_t),
+        cudaMemcpyDeviceToHost,
+        stream);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "processTileCuda D2H failed: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+
+    // Block this thread until the stream finishes.
+    // AsyncGPUWorker::execute will NOT call synchronizeStream a second time
+    // because processTileCuda already synced here.
+    err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "processTileCuda stream sync failed: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+
+    // Expand gray → RGB in tile.data (in-place, safe because gray_host is a copy)
+    uint8_t* ptr = tile.getRawPtr();
+    for (size_t i = 0; i < numPixels; ++i) {
+        uint8_t g = gray_host[i];
+        ptr[i * 3 + 0] = g;
+        ptr[i * 3 + 1] = g;
+        ptr[i * 3 + 2] = g;
+    }
+
     return true;
 }
 

@@ -198,8 +198,9 @@ void TiledOutputWriter::process_and_write(Tile *tile)
     {
 
         // Offset the pointer using the ACTUAL overlap, not the theoretical overlap
-        const uint8_t *src_row = tile->data.data() + (size_t)(actual_top_ov + row) * src_row_stride + (size_t)actual_left_ov * channels_;
-
+        const uint8_t *src_row = tile->getRawPtr() +
+        (size_t)(actual_top_ov + row) * src_row_stride +
+        (size_t)actual_left_ov * channels_;
         uint8_t *dst_row = stripped.data() + (size_t)row * dst_row_stride;
 
         memcpy(dst_row, src_row, (size_t)dst_row_stride);

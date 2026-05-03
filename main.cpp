@@ -13,6 +13,7 @@
 #include "Scheduler.h"
 #include "TileOptimizer.h"
 #include "VramManager.h"
+
 // --- Thread-Safe Console Logging ---
 std::mutex printMutex;
 void logMessage(const std::string &msg)
@@ -119,13 +120,13 @@ int main()
         logMessage("[Main] Reserving 1 core for Reader, 1 for Writer. Spawning " + std::to_string(numWorkers) + " Worker threads.");
 
         // =========================================================
-        // MILESTONE 3: Memory Manager (VRAM Pool Initialization)
+        // Memory Manager (VRAM Pool Initialization)
         // =========================================================
-        logMessage("[Main] Milestone 3: Initializing VRAM Manager Pool...");
+        logMessage("[Main] Initializing VRAM Manager Pool...");
 
         // Calculate the maximum possible size for a tile in bytes
         // Using the larger GPU tile size to ensure buffers are big enough
-        size_t maxTileBytes = gpuTileSize * gpuTileSize * imgChannels * sizeof(uint8_t);
+        size_t maxTileBytes = gpuTileSize * gpuTileSize * (imgChannels+1) * sizeof(uint8_t);
 
         // Allocate 1 buffer per worker, plus 2 extra for smooth overlapping
         VramManager vramPool(numWorkers + 2, maxTileBytes);
@@ -133,9 +134,9 @@ int main()
         logMessage("[Main] Pre-allocated " + std::to_string(numWorkers + 2) + " GPU buffers.");
 
         // =========================================================
-        // MILESTONE 2/4: Asynchronous GPU Transfers & Tile Optimization
+        // Asynchronous GPU Transfers & Tile Optimization
         // =========================================================
-        logMessage("[Main] Milestone 2 & 4: Async GPU transfers and tile optimization ENABLED");
+        logMessage("[Main] Async GPU transfers and tile optimization ENABLED");
 
         BoundedTileQueue inputQueue(static_cast<size_t>(numWorkers * 2));
         Scheduler scheduler;

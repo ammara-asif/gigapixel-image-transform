@@ -1,9 +1,10 @@
 #include "AsyncGPUWorker.h"
 #include "Transform.h"
+#include "CUDAKernels.h"  
 #include <iostream>
 #include <cstring>
 #include <stdexcept>
-#include <cuda_runtime.h> // Added for CUDA API
+#include <cuda_runtime.h> // Addaed for CUDA API
 
 AsyncGPUWorker::AsyncGPUWorker() : currentGPU(0)
 {
@@ -59,54 +60,51 @@ void AsyncGPUWorker::setGPUDevice(int deviceId)
     initializeGPU();
 }
 
-// UPDATED: Now accepts the pre-allocated VRAM buffer (d_buffer)
-void AsyncGPUWorker::execute(Tile &tile, uint8_t *d_buffer)
-{
-    // Use the exact allocated size from our pinned memory Tile update
-    size_t tileDataSize = tile.dataSizeBytes;
 
+void AsyncGPUWorker::execute(Tile& tile, uint8_t* d_buffer)
+{
+    const size_t tileDataSize = tile.dataSizeBytes;
+
+    std::cout << "[AsyncGPUWorker] Processing tile (" << tile.x << "," << tile.y
+              << ")  " << tile.width << "x" << tile.height
+              << "  size=" << (tileDataSize / 1024) << " KB" << std::endl;
+
+    int streamId = -1;
     try
     {
-        // Phase 1: Async H2D Transfer
-        std::cout << "[AsyncGPUWorker] Async H2D transfer for tile (" << tile.x << ","
-                  << tile.y << "), size: " << (tileDataSize / 1024) << " KB" << std::endl;
+        streamId = streamManager->acquireStream();
+        cudaStream_t rawStream = streamManager->getRawCudaStream(streamId);
 
-        // Note: Using tile.getRawPtr() to access the pinned host memory
-        int streamId = streamManager->acquireStream();
+        // Full pipeline: H2D → kernel → D2H → sync — all inside processTileCuda.
+        // It uses d_buffer for device memory and rawStream for async ordering.
+        bool gpuOk = processTileCuda(tile, d_buffer, rawStream);
 
-        // Phase 2: GPU Computation
-        std::cout << "[AsyncGPUWorker] Launching GPU kernel on tile (" << tile.x << ","
-                  << tile.y << ")" << std::endl;
-        executeGPUKernel(tile, d_buffer, streamId);
+        if (!gpuOk)
+        {
+            // Operation not supported on GPU (e.g. ROTATE_90_CW) or CUDA error.
+            // Fall back to CPU.  The stream is still released below.
+            std::cout << "[AsyncGPUWorker] GPU path unavailable, falling back to CPU" << std::endl;
+            processTile(tile);   // CPU fallback from Transform.h
+        }
 
-        // Phase 3: Async D2H Transfer
-        std::cout << "[AsyncGPUWorker] Async D2H transfer for tile (" << tile.x << ","
-                  << tile.y << ")" << std::endl;
-
-        // The D2DTransfer method name in your old code looks like a typo (launchD2DTransfer),
-        // assuming it acts as a Device-To-Host transfer here.
-        streamManager->launchD2HTransfer(streamId, tile.getRawPtr(), d_buffer, tileDataSize);
-
-        // Phase 4: Stream Synchronization
-        // CRITICAL: We must block this specific worker thread until the GPU finishes this tile.
-        // If we don't, main.cpp will return d_buffer to the pool while the GPU is still using it!
-        // Because other worker threads are doing this simultaneously on OTHER streams,
-        // the GPU remains fully saturated and overlaps transfers/compute.
-
-        // Assuming your CUDAStreamManager has a method to sync a specific stream.
-        // If not, you will need to add it, or use standard CUDA: cudaStreamSynchronize(stream);
-        // streamManager->synchronizeStream(streamId);
+        // Release the stream back to the pool.
+        // cudaStreamSynchronize inside processTileCuda already guaranteed the
+        // device is idle, so this call returns immediately on the CUDA side.
         streamManager->synchronizeStream(streamId);
 
         recordPerformance();
     }
-    catch (const std::exception &e)
+    catch (const std::exception& e)
     {
         std::cerr << "[AsyncGPUWorker] Execution error: " << e.what() << std::endl;
 
-        // Fallback to CPU processing
+        // Always release the stream so the pool is not permanently exhausted.
+        if (streamId >= 0)
+            streamManager->synchronizeStream(streamId);
+
+        // CPU fallback
         std::cout << "[AsyncGPUWorker] Falling back to CPU processing" << std::endl;
-        // processTile(tile); // Uncomment/implement your CPU fallback logic here
+        processTile(tile);
     }
 }
 
