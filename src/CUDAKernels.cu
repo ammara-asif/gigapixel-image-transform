@@ -166,7 +166,7 @@ bool processTileCuda(Tile& tile, uint8_t* d_buffer, cudaStream_t stream)
         return false;
 
     const size_t numPixels = static_cast<size_t>(tile.width) * static_cast<size_t>(tile.height);
-    const size_t channels = tile.dataSizeBytes / numPixels;
+    const size_t channels =  tile.channels;;
     if (channels != 3)
         return false;
 

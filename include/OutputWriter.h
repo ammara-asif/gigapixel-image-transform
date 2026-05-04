@@ -18,7 +18,8 @@ public:
                       int channels,
                       int total_tiles,
                       int logical_tile_size,
-                      bool big_tiff = true);
+                      bool big_tiff = true,
+                    bool use_compression);
 
     ~TiledOutputWriter();
 
@@ -43,6 +44,15 @@ private:
     int total_tiles_;
     int logical_tile_size_;
     bool big_tiff_;
+    bool useCompression_ = false;
+
+
+// Compressed tile wrapper (stored on queue instead of raw Tile)
+    struct CompressedTile {
+        int x, y, width, height, overlap;
+        std::vector<uint8_t> compressed; // LZ4 output
+        size_t originalSize;             // needed for LZ4_decompress
+    };
 
     // ---- libtiff handle ----
     TIFF *tif_;

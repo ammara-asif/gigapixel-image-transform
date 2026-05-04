@@ -1,6 +1,6 @@
 #include "OutputWriter.h"
 #include <cstring>
-
+#include <lz4.h>
 #include <tiffio.h>
 #define TIF reinterpret_cast<TIFF *>(tif_) // memcpy
 #include <cstdio>                          // printf
@@ -16,15 +16,18 @@ TiledOutputWriter::TiledOutputWriter(
     int channels,
     int total_tiles,
     int logical_tile_size,
-    bool big_tiff) : filename_(filename),
-                     full_width_(full_width),
-                     full_height_(full_height),
-                     channels_(channels),
-                     total_tiles_(total_tiles),
-                     logical_tile_size_(logical_tile_size),
-                     big_tiff_(big_tiff),
-                     tif_(nullptr),
-                     done_(false)
+    bool big_tiff,
+    bool use_compression)
+     : filename_(filename),
+        full_width_(full_width),
+        full_height_(full_height),
+        channels_(channels),
+        total_tiles_(total_tiles),
+        logical_tile_size_(logical_tile_size),
+        big_tiff_(big_tiff),
+        useCompression_(use_compression),
+        tif_(nullptr),
+        done_(false)
 {
     omp_init_lock(&queue_lock_);
     open_tiff(); // opens the TIFF file and writes all required tags
@@ -48,6 +51,31 @@ TiledOutputWriter::~TiledOutputWriter()
 void TiledOutputWriter::submit_tile(const Tile &tile)
 {
     Tile *copy = clone_tile(tile);
+
+     if (useCompression_) {
+        size_t srcSize   = copy->dataSizeBytes;
+        int    maxDst    = LZ4_compressBound(static_cast<int>(srcSize));
+        std::vector<uint8_t> compressed(maxDst);
+ 
+        int compressedSize = LZ4_compress_default(
+            reinterpret_cast<const char*>(copy->getRawPtr()),
+            reinterpret_cast<char*>(compressed.data()),
+            static_cast<int>(srcSize),
+            maxDst);
+ 
+        if (compressedSize > 0) {
+            compressed.resize(compressedSize);
+            copy->originalSize    = srcSize;            // save for decompressor
+            copy->compressedData  = std::move(compressed);
+            copy->isCompressed    = true;
+            // We no longer need the pinned copy — free it to reclaim RAM.
+            // The pixels now live in compressedData (a plain std::vector).
+            copy->data.reset();
+            copy->dataSizeBytes = 0;
+        }
+        // If LZ4 failed (compressedSize <= 0) we fall through with the
+        // uncompressed clone — process_and_write handles both cases.
+    }
 
     omp_set_lock(&queue_lock_);
     queue_.push(copy);
@@ -76,7 +104,7 @@ void TiledOutputWriter::finalize()
         TIFFClose(TIF);
         tif_ = nullptr;
     }
-    printf("[Writer] All %d tiles written and file closed.\n", total_tiles_);
+    printf("[Writer] All tiles written and file closed.\n");
 }
 
 // run  (writer thread loop)
@@ -100,8 +128,8 @@ void TiledOutputWriter::run()
         process_and_write(tile);
         tiles_written++;
 
-        printf("[Writer] Wrote tile at (%d,%d)  [%d / %d]\n",
-               tile->x, tile->y, tiles_written, total_tiles_);
+        printf("[Writer] Wrote tile at (%d,%d)  [%d]\n",
+               tile->x, tile->y, tiles_written);
 
         delete tile; // free the heap copy made in clone_tile()
     }
@@ -144,9 +172,13 @@ void TiledOutputWriter::open_tiff()
     TIFFSetField(TIF, TIFFTAG_TILEWIDTH, tile_dim);
     TIFFSetField(TIF, TIFFTAG_TILELENGTH, tile_dim);
 
-    printf("[Writer] Opened output: %s  (%dx%d  %dch  %s)\n",
-           filename_.c_str(), full_width_, full_height_, channels_,
-           big_tiff_ ? "BigTIFF" : "TIFF");
+    printf("[Writer] Opened output: %s  (%dx%d  %dch  %s%s)\n",
+       filename_.c_str(),
+       full_width_,
+       full_height_,
+       channels_,
+       big_tiff_ ? "BigTIFF" : "TIFF",
+       useCompression_ ? "  LZ4-queue" : "");
 }
 
 // clone_tile  (private)
@@ -161,13 +193,49 @@ Tile *TiledOutputWriter::clone_tile(const Tile &src)
     t->width = src.width;   // buffer width  INCLUDING overlap
     t->height = src.height; // buffer height INCLUDING overlap
     t->overlap = src.overlap;
-    t->data = src.data; // std::vector copy (deep copy of pixel bytes)
+    t->channels     = src.channels;
+    t->dataSizeBytes = src.dataSizeBytes;
+    t->isCompressed  = false;   // compression happens after clone
+ 
+    // Allocate a plain heap buffer and copy the pixels into it.
+    uint8_t* heap = new uint8_t[src.dataSizeBytes];
+    std::memcpy(heap, src.getRawPtr(), src.dataSizeBytes);
+ 
+    // Wrap in a shared_ptr with a plain delete[] deleter (not cudaFreeHost).
+    t->data = std::shared_ptr<uint8_t>(heap, [](uint8_t* p){ delete[] p; });
+ 
     return t;
 }
 
 // process_and_write  (private)
 void TiledOutputWriter::process_and_write(Tile *tile)
 {
+    // ---- If the tile was LZ4-compressed on the queue, decompress first ----
+    if (tile->isCompressed) {
+        std::vector<uint8_t> decompressed(tile->originalSize);
+ 
+        int result = LZ4_decompress_safe(
+            reinterpret_cast<const char*>(tile->compressedData.data()),
+            reinterpret_cast<char*>(decompressed.data()),
+            static_cast<int>(tile->compressedData.size()),
+            static_cast<int>(tile->originalSize));
+ 
+        if (result < 0)
+            throw std::runtime_error("[Writer] LZ4 decompression failed at tile ("
+                + std::to_string(tile->x) + "," + std::to_string(tile->y) + ")");
+ 
+        // Replace the compressed storage with the decompressed bytes so the
+        // overlap-strip code below can call getRawPtr() normally.
+        uint8_t* heap = new uint8_t[tile->originalSize];
+        std::memcpy(heap, decompressed.data(), tile->originalSize);
+        tile->data = std::shared_ptr<uint8_t>(heap, [](uint8_t* p){ delete[] p; });
+        tile->dataSizeBytes = tile->originalSize;
+        tile->isCompressed  = false;
+        tile->compressedData.clear();
+        tile->compressedData.shrink_to_fit();
+    }
+ 
+    // ---- Strip overlap ----
     int ov = tile->overlap;
 
     // 1. Calculate EXACTLY how much overlap exists on the left and top.

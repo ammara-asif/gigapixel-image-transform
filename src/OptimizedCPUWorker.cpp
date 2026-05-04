@@ -55,7 +55,7 @@ void OptimizedCPUWorker::grayscaleOptimized(Tile& tile) {
 
     uint8_t* px       = tile.getRawPtr();
     size_t numPixels  = static_cast<size_t>(tile.width) * tile.height;
-    int    channels   = static_cast<int>(tile.dataSizeBytes / numPixels);
+    int    channels   = tile.channels;
 
     int stripHeight = std::max(1, (int)(cacheInfo.l1CacheSize / (tile.width * channels)));
     stripHeight     = std::min(stripHeight, tile.height);
@@ -80,7 +80,7 @@ void OptimizedCPUWorker::rotateOptimized(Tile& tile) {
 
     uint8_t* px      = tile.getRawPtr();
     size_t numPixels = static_cast<size_t>(tile.width) * tile.height;
-    int    channels  = static_cast<int>(tile.dataSizeBytes / numPixels);
+    int    channels  = tile.channels;
 
     std::vector<uint8_t> rotated(tile.dataSizeBytes, 0);
 

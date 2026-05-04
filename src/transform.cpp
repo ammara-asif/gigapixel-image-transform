@@ -14,7 +14,8 @@ void processTile(Tile &tile)
         return;
 
     // dataSizeBytes = width * height * channels, so:
-    int channels = static_cast<int>(tile.dataSizeBytes / numPixels);
+   
+    int channels = tile.channels;
     uint8_t* px = tile.getRawPtr();
 
     // --- ALGORITHM 1: POINT OPERATION (GRAYSCALE) ---

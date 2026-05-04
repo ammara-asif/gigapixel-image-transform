@@ -64,7 +64,7 @@ int main()
         // =========================================================
 
         logMessage("[Main] Initializing TileReader for 'input.tiff'...");
-        TileReader reader("images/input.tiff");
+        TileReader reader("input.tiff");
         int overlap = 0;
 
         logMessage("[Main] Computing optimal tile sizes based on device capabilities...");
@@ -110,7 +110,7 @@ int main()
             imgChannels,
             0,
             tileSize,
-            false); // Use BigTIFF if set to True
+            false, true); // Use BigTIFF if set to True
 
         // Hardware concurrency setup
         unsigned int numCores = std::thread::hardware_concurrency();
@@ -138,7 +138,7 @@ int main()
         // =========================================================
         logMessage("[Main] Async GPU transfers and tile optimization ENABLED");
 
-        BoundedTileQueue inputQueue(static_cast<size_t>(numWorkers * 2));
+        BoundedTileQueue inputQueue(static_cast<size_t>(numWorkers * 4));
         Scheduler scheduler;
 
         // ---------------------------------------------------------
@@ -180,75 +180,83 @@ int main()
                 logMessage("[Worker " + std::to_string(i) + "] Queue empty & finished signal received. Shutting down."); });
         }
 
-        // ---------------------------------------------------------
-        // The Reader (Main Thread)
-        // ---------------------------------------------------------
-        logMessage("[Main/Reader] Pipeline fully active. Beginning disk reads...");
+        
+        // ---- Reader thread (prefetch) ----
+        // Runs concurrently with workers — pushes tiles into the bounded queue
+        // and blocks on not_full when workers are slow.  Calling setFinished()
+        // at the end causes pop() to return false once the queue is drained.
+        logMessage("[Main] Starting reader (prefetch) thread...");
 
         int nTilesX = (output_w + tileSize - 1) / tileSize;
         int nTilesY = (output_h + tileSize - 1) / tileSize;
         int totalTiles = nTilesX * nTilesY;
         int tilesRead = 0;
 
-        for (int out_y = 0; out_y < output_h; out_y += tileSize)
-        {
-            for (int out_x = 0; out_x < output_w; out_x += tileSize)
-            {
-                int tile_w = std::min(tileSize, output_w - out_x);
-                int tile_h = std::min(tileSize, output_h - out_y);
+        // launch as a thread
+        std::thread readerThread([&]() {
+            for (int out_y = 0; out_y < output_h; out_y += tileSize){
+                for (int out_x = 0; out_x < output_w; out_x += tileSize){
+                    int tile_w = std::min(tileSize, output_w - out_x);
+                    int tile_h = std::min(tileSize, output_h - out_y);
 
-                int in_x, in_y, read_w, read_h;
+                    int in_x, in_y, read_w, read_h;
 
-                if (currentOp == TransformOperation::ROTATE_90_CW)
-                {
-                    in_x = out_y;
-                    in_y = input_h - out_x - tile_w;
-                    read_w = tile_h;
-                    read_h = tile_w;
+                    if (currentOp == TransformOperation::ROTATE_90_CW)
+                    {
+                        in_x = out_y;
+                        in_y = input_h - out_x - tile_w;
+                        read_w = tile_h;
+                        read_h = tile_w;
+                    }
+                    else
+                    {
+                        in_x = out_x;
+                        in_y = out_y;
+                        read_w = tile_w;
+                        read_h = tile_h;
+                    }
+
+                    logMessage("[Reader] Tile " + std::to_string(tilesRead + 1) + "/" + std::to_string(totalTiles) +
+                            " | Read (" + std::to_string(in_x) + "," + std::to_string(in_y) + ") -> Write (" +
+                            std::to_string(out_x) + "," + std::to_string(out_y) + ")");
+
+                    Tile loadedTile = reader.getTile(in_x, in_y, read_w, read_h, overlap);
+
+                    loadedTile.out_x = out_x;
+                    loadedTile.out_y = out_y;
+                    loadedTile.operation = currentOp;
+                    loadedTile.x = out_x;
+                    loadedTile.y = out_y;
+
+                    inputQueue.push(std::move(loadedTile));
+                    tilesRead++;
                 }
-                else
-                {
-                    in_x = out_x;
-                    in_y = out_y;
-                    read_w = tile_w;
-                    read_h = tile_h;
-                }
-
-                logMessage("[Main/Reader] Tile " + std::to_string(tilesRead + 1) + "/" + std::to_string(totalTiles) +
-                           " | Read (" + std::to_string(in_x) + "," + std::to_string(in_y) + ") -> Write (" +
-                           std::to_string(out_x) + "," + std::to_string(out_y) + ")");
-
-                Tile loadedTile = reader.getTile(in_x, in_y, read_w, read_h, overlap);
-
-                loadedTile.out_x = out_x;
-                loadedTile.out_y = out_y;
-                loadedTile.operation = currentOp;
-                loadedTile.x = out_x;
-                loadedTile.y = out_y;
-
-                inputQueue.push(std::move(loadedTile));
-                tilesRead++;
             }
-        }
 
-        // --- Graceful Shutdown Sequence ---
-        logMessage("[Main] All tiles read from disk. Sending 'Finished' signal to Input Queue.");
-        inputQueue.setFinished();
+            // --- Graceful Shutdown Sequence ---
+            logMessage("[Reader] All tiles read from disk. Sending 'Finished' signal to Input Queue.");
+            inputQueue.setFinished();
+        });
 
-        logMessage("[Main] Waiting for Worker threads to clear the remaining queue...");
+        //Joining: 
+        //   1. readerThread  — wait for all tiles to be pushed
+        //   2. workers       — wait for all tiles to be processed
+        //   3. writer        — finalise + join after workers done
+
+        readerThread.join();
+
+        logMessage("[Main] Reader finished.");
         for (auto &worker : workers)
         {
             worker.join();
         }
         logMessage("[Main] All Worker threads have successfully joined (shutdown).");
 
-        logMessage("[Main] Finalizing Output Writer (pushing sentinel and waiting)...");
         writer.finalize();
-
         logMessage("[Main] Joining Writer thread...");
         writerThread.join();
 
-        logMessage("[Main] Pipeline integration complete. Image processed and saved.");
+        logMessage("[Main] Pipeline complete. Output saved to output.tiff");
     }
     catch (const std::exception &e)
     {

@@ -163,7 +163,7 @@ Tile TileReader::getTile(int x, int y, int width, int height, int overlap)
     tile.operation = TransformOperation::GRAYSCALE; // Make sure to set a default or assign it later
 
     // UPDATED: Allocate pinned memory instead of resizing a std::vector
-    tile.allocate(readWidth * readHeight * channels);
+    tile.allocate(readWidth * readHeight * (channels+1), channels);
 
     // read data
     if (TIFFIsTiled(tif))

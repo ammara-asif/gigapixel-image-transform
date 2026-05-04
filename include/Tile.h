@@ -36,7 +36,7 @@ struct Tile
     int out_x = 0, out_y = 0;  // Coordinate in the OUTPUT file (write location)
     int width = 0, height = 0; // buffer dimensions (includes overlap)
     int overlap = 0;
-
+    int channels = 0;
     TransformOperation operation;
 
     // --- Pinned Memory Buffer ---
@@ -46,8 +46,13 @@ struct Tile
     // Track allocated size for easy reference during memcopies
     size_t dataSizeBytes = 0;
 
+     // --- LZ4 compression (used by TiledOutputWriter) ---
+    bool                 isCompressed  = false;
+    size_t               originalSize  = 0;   // uncompressed byte count
+    std::vector<uint8_t> compressedData;       // LZ4 output bytes
+
     // Helper to allocate pinned memory
-    void allocate(size_t numBytes)
+    void allocate(size_t numBytes,  int numChannels)
     {
         uint8_t *raw_ptr = nullptr;
         cudaError_t err = cudaMallocHost((void **)&raw_ptr, numBytes);
@@ -60,6 +65,7 @@ struct Tile
 
         data = std::shared_ptr<uint8_t>(raw_ptr, CudaHostDeleter());
         dataSizeBytes = numBytes;
+        channels = numChannels; 
     }
 
     // Helper to get raw pointer for LibTIFF and CUDA functions
