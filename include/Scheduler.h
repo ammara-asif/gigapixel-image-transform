@@ -5,6 +5,7 @@
 #include "OptimizedCPUWorker.h"
 #include "AsyncGPUWorker.h"
 #include "TileOptimizer.h"
+#include "PipelineComposition.h" // For pipeline-aware scheduling
 
 /**
  * Scheduler: Intelligent task distribution with device-specific optimizations
@@ -33,6 +34,25 @@ private:
         // Rule 1: Small tiles always go to CPU (GPU launch overhead not worth it)
         if (pixel_count < 256 * 256)
             return DeviceType::CPU;
+
+        // Rule 1.5: Pipeline complexity considerations (Milestone 3)
+        if (tile.usePipeline())
+        {
+            auto pipeline = tile.pipeline;
+            // Complex pipelines (many stages, filters) → CPU for now
+            if (pipeline->getStageCount() > 2 || pipeline->requiresOverlapRegion())
+                return DeviceType::CPU;
+
+            // Simple point-operation pipelines can go to GPU
+            if (pipeline->isSimplePointOperation())
+            {
+                int gpuLoad = gpuQueueDepth.load();
+                int cpuLoad = cpuQueueDepth.load();
+                if (gpuLoad < GPU_OVERLOAD_THRESHOLD && gpuLoad <= cpuLoad)
+                    return DeviceType::GPU;
+            }
+            return DeviceType::CPU;
+        }
 
         // Rule 2: Irregular access patterns (rotation) → CPU
         // (Non-sequential memory access, poor GPU coalescing)
