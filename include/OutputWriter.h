@@ -19,7 +19,7 @@ public:
                       int total_tiles,
                       int logical_tile_size,
                       bool big_tiff = true,
-                    bool use_compression);
+                      bool use_compression = false);
 
     ~TiledOutputWriter();
 
