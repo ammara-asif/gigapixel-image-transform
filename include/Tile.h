@@ -6,15 +6,16 @@
 #include <stdexcept>
 #include <string>
 #include <cuda_runtime.h> // Required for CUDA memory APIs
+#include "TransformType.h"
+
+// Include full pipeline definition because Tile::usePipeline() calls
+// `getStageCount()` which requires the complete type.
+#include "PipelineComposition.h"
+
+// (PipelineComposition.h is included above; no forward declaration needed)
 
 // Memory budget per tile. Total usage ≈ TILE_MEMORY_BUDGET * num_threads * 2 (double buffering).
 static constexpr size_t TILE_MEMORY_BUDGET = 32 * 1024 * 1024; // 32 MB
-
-enum class TransformOperation
-{
-    GRAYSCALE,
-    ROTATE_90_CW
-};
 
 // --- CUDA Custom Deleter ---
 // Ensures pinned memory is safely freed when the Tile is destroyed
@@ -37,7 +38,11 @@ struct Tile
     int width = 0, height = 0; // buffer dimensions (includes overlap)
     int overlap = 0;
     int channels = 0;
-    TransformOperation operation;
+    // Backward compatibility: single operation
+    TransformOperation operation = TransformOperation::GRAYSCALE;
+
+    // Pipeline composition (new for Milestone 3)
+    std::shared_ptr<TransformPipeline> pipeline;
 
     // --- Pinned Memory Buffer ---
     // Replaced std::vector with a shared_ptr managing page-locked memory
@@ -72,6 +77,39 @@ struct Tile
     uint8_t *getRawPtr() const
     {
         return data.get();
+    }
+
+    /**
+     * Set a pipeline for this tile (Milestone 3)
+     */
+    void setPipeline(const std::shared_ptr<TransformPipeline>& p)
+    {
+        pipeline = p;
+    }
+
+    /**
+     * Check if this tile has a pipeline
+     */
+    bool hasPipeline() const
+    {
+        return pipeline != nullptr;
+    }
+
+    /**
+     * Set a single operation (backward compatibility)
+     */
+    void setSingleOperation(TransformOperation op)
+    {
+        operation = op;
+        pipeline = nullptr;
+    }
+
+    /**
+     * Check if tile should use pipeline or single operation
+     */
+    bool usePipeline() const
+    {
+        return hasPipeline() && pipeline->getStageCount() > 0;
     }
 };
 
