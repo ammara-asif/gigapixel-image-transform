@@ -122,9 +122,13 @@ void OptimizedCPUWorker::grayscaleOptimized(Tile& tile) {
 void OptimizedCPUWorker::rotateOptimized(Tile& tile) {
     std::cout << "[OptimizedCPUWorker] Running cache-optimized rotation" << std::endl;
 
-    uint8_t* px      = tile.getRawPtr();
-    size_t numPixels = static_cast<size_t>(tile.width) * tile.height;
-    int    channels  = static_cast<int>(tile.dataSizeBytes / numPixels);
+    uint8_t* data = tile.getRawPtr();
+    if (!data || tile.dataSizeBytes == 0 || tile.width <= 0 || tile.height <= 0) {
+        throw std::runtime_error("Invalid tile buffer for rotation optimization");
+    }
+
+    const size_t numPixels = static_cast<size_t>(tile.width) * static_cast<size_t>(tile.height);
+    const size_t channels = std::max<size_t>(1, tile.dataSizeBytes / numPixels);
 
     uint8_t* rotated_raw = nullptr;
     if (cudaMallocHost((void**)&rotated_raw, tile.dataSizeBytes) != cudaSuccess || rotated_raw == nullptr) {
