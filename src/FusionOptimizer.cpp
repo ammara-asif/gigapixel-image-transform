@@ -13,7 +13,7 @@
 #endif
 
 FusionOptimizer::AlignedBuffer::AlignedBuffer(size_t sz, size_t align)
-    : data(nullptr, [](uint8_t *p)
+    : data(nullptr, [](void *p) noexcept
            {
 #ifdef _WIN32
                _aligned_free(p);
